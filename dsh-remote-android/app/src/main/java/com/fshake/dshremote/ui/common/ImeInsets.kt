@@ -18,6 +18,8 @@ import androidx.core.view.WindowInsetsCompat
  *
  * 另有一条兜底：键盘已经显示或撤销、却没有动画回调（Activity 重建时键盘还在、
  * 窗口失焦直接撤键盘），此时按窗口上报的真实 inset 校正，避免页面停在旧高度。
+ * 这次校正必须推迟一帧：Android 16 上有 ROM 先派发终点 inset、同一毫秒内才回调
+ * onStart，若当场采用，onStart 就会把自己的终点值误判成「收起」，页面先弹回再让位。
  */
 fun installImeTargetListener(window: Window, target: MutableIntState) {
     val decor = window.decorView
@@ -36,7 +38,13 @@ fun installImeTargetListener(window: Window, target: MutableIntState) {
     ViewCompat.setOnApplyWindowInsetsListener(decor) { _, insets ->
         if (!animating) {
             val actual = insets.getInsets(imeType).bottom
-            if (actual != target.intValue) target.intValue = actual
+            val current = target.intValue
+            if (actual != current) {
+                // 推一帧再采用，把优先权让给即将到来的 onStart；真的没有动画时由这次兜底校正。
+                decor.post {
+                    if (!animating && target.intValue == current) target.intValue = actual
+                }
+            }
         }
         insets
     }
