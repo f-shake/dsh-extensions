@@ -1,6 +1,7 @@
 package com.fshake.dshremote
 
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -14,6 +15,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // 屏幕常亮：看的是远处那台机器上的进度，屏幕自己灭掉会让人以为连接断了。
+        // 只在本窗口可见时生效，退回桌面或被别的应用盖住后系统照常息屏。
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val container = (application as DshRemoteApp).container
         // 键盘的终点高度：动画一开始就拿到，页面布局只跟着变一次
         val imeBottom = mutableIntStateOf(0)

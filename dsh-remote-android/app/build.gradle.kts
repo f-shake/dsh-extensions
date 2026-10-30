@@ -20,8 +20,8 @@ android {
         applicationId = "com.fshake.dshremote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 37
-        versionName = "1.0.36"
+        versionCode = 38
+        versionName = "1.0.37"
     }
 
     signingConfigs {
