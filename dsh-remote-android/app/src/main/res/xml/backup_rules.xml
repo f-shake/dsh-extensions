@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 不参与备份：保存的密码与会话 cookie 都留在本机 -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="database" path="." />
+</full-backup-content>

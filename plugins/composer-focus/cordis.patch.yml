@@ -1,0 +1,3 @@
+- insert:
+    - id: composer-focus
+      name: '@local/composer-focus'

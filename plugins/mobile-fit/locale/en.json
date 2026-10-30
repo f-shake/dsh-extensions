@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "title": "Mobile fit",
+    "description": "Narrow-screen adaptation: the sidebar becomes a header logo plus drawer, swipes open and close it, the shell follows the on-screen keyboard, and the settings sheet reflows to one column."
+  },
+  "open": "Open sidebar",
+  "close": "Close sidebar"
+}

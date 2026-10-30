@@ -1,0 +1,3 @@
+- insert:
+    - id: session-activity-order
+      name: '@local/session-activity-order'

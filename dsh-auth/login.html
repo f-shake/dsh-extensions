@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>DSH 安全访问</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: radial-gradient(circle at 20% 0%, #19324f 0, #0b1220 45%, #070b12 100%);
+    color: #e8eef7; font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: min(100%, 430px); padding: 34px 30px; border: 1px solid #24344a;
+    border-radius: 18px; background: rgba(13, 21, 34, .92);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, .45);
+  }
+  .mark {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 42px; height: 42px; margin-bottom: 18px; border-radius: 12px;
+    background: linear-gradient(135deg, #2f6fed, #24b3a8); color: #fff;
+    font-weight: 800; letter-spacing: .5px;
+  }
+  h1 { margin: 0 0 8px; font-size: 22px; letter-spacing: .2px; }
+  .sub { margin: 0 0 26px; color: #9fb0c7; font-size: 14px; }
+  label { display: block; margin: 16px 0 7px; color: #c7d3e3; font-size: 13px; font-weight: 600; }
+  input {
+    width: 100%; padding: 12px 13px; border: 1px solid #2a3b52; border-radius: 10px;
+    background: #0a111c; color: #eef4fc; font-size: 15px; outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  input:focus { border-color: #3f7df2; box-shadow: 0 0 0 3px rgba(63, 125, 242, .18); }
+  input[name="code"] { letter-spacing: .35em; font-variant-numeric: tabular-nums; }
+  button {
+    width: 100%; margin-top: 24px; padding: 12px 16px; border: 0; border-radius: 10px;
+    background: linear-gradient(135deg, #2f6fed, #2560d8); color: #fff;
+    font-size: 15px; font-weight: 700; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  .foot { margin: 18px 0 0; color: #6f8199; font-size: 12px; text-align: center; }
+  .hint { margin: 10px 0 0; color: #7e91aa; font-size: 12px; }
+  /* 唯一新增：失败提示，沿用 .hint 的位置与字号，只在有内容时出现 */
+  .err {
+    margin: 10px 0 0; padding: 9px 11px; border-radius: 9px; font-size: 12.5px;
+    background: rgba(255, 107, 107, .10); border: 1px solid rgba(255, 107, 107, .32);
+    color: #ffb4b4;
+  }
+  .err:empty { display: none; }
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="mark">DSH</div>
+  <h1>安全访问</h1>
+  <p class="sub">请输入访问密码，以及身份验证器中的 6 位动态验证码。</p>
+
+  <form method="post" action="/_app_login" autocomplete="on">
+    <label for="password">访问密码</label>
+    <input id="password" name="password" type="password" autocomplete="current-password"
+           required autofocus placeholder="输入密码">
+
+    <label for="code">动态验证码</label>
+    <input id="code" name="code" type="text" inputmode="numeric" pattern="[0-9]{6}"
+           maxlength="6" autocomplete="one-time-code" required placeholder="000000">
+
+    <button type="submit">登录 DSH</button>
+  </form>
+
+  <p class="err">{{ERROR}}</p>
+  <p class="hint">验证码每 30 秒更新；同一个验证码只能使用一次。</p>
+  <p class="foot">凭据只在 HTTPS 连接中传输</p>
+</main>
+<script>
+  var c = document.getElementById('code');
+  c.addEventListener('input', function () {
+    this.value = this.value.replace(/\D/g, '').slice(0, 6);
+  });
+</script>
+</body>
+</html>

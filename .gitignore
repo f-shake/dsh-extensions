@@ -1,0 +1,36 @@
+# ---------- 通用 ----------
+node_modules/
+*.tgz
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+
+# ---------- dsh-remote-android（Gradle / Android）----------
+.gradle/
+.kotlin/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+*.jks
+*.keystore
+*.p12
+signing/keystore.properties
+*.apk
+*.aab
+
+# ---------- dsh-auth（Python）----------
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+dsh-auth/.env
+dsh-auth/.env.*
+!dsh-auth/.env.example
+dsh-auth/totp-qr.png
