@@ -1,0 +1,21 @@
+{
+  "name": "@local/background-send",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "description": "用户插话时，把正在等待的前台 shell 命令转到后台",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT"
+}

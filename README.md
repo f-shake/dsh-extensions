@@ -9,7 +9,8 @@ dsh-extensions/
 └── plugins/                   DSH 客户端插件（Cordis bundle）
     ├── mobile-fit/            窄屏适配：弹窗/设置面板不超屏
     ├── session-activity-order/ 侧栏排序：活跃工作区/会话自动置顶
-    └── composer-focus/        输入框交互：点按钮不拉键盘、滑聊天区收键盘、切会话不自动弹键盘
+    ├── composer-focus/        输入框交互：点按钮不拉键盘、滑聊天区收键盘、切会话不自动弹键盘
+    └── background-send/       插话即转后台：用户插话时把前台命令转到后台
 ```
 
 三部分是独立的交付物，各有自己的构建方式和部署位置，只是一起做版本管理。
