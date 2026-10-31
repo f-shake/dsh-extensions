@@ -59,9 +59,18 @@
         assetPoolBytes: 67108864   # 外置图片池上限（默认 64 MB）；池满时只跳过超限的那张图
         shellCache: true           # 是否接管 /assets/* 补缓存头
         shellRoot: ''              # 可选，前端 dist 目录；留空则按 dsh-web-app 的锚点自动解析
+        openWindow:                # 会话首次打开的窗口（收窄首屏，回补不受影响）
+          enabled: true
+          maxMessages: 60          # 1–500，上限与上游默认页大小对齐（本插件只收窄，不放宽）
+          minMessages: 12          # 1..maxMessages
+          minTurns: 2              # 1–20
 ```
 
 数字项写成 `null`、空串或非数字时一律退回默认值（不会被当成 0 而静默关掉功能）。
+
+`openWindow` 只替换客户端包里 `events.open(...)` 那一处调用；`loadOlder()` 走的是
+`events.prepend(...)`，所以“加载更早”拿到的仍是上游的 500/50 大页。锚点必须唯一命中才改写，
+上游若重构出两处相同调用，插件会放弃改写并只 warn 一次，页面照常加载。
 
 ## 安装与生效
 
@@ -138,5 +147,10 @@ false 切成 true），避免把「插件集变化」混进差值里：
 
 - 不 minify、不重新打包前端（本机是 npm 安装产物，没有构建期）；
 - 不动 `__DSH_BOOT__` 的批次结构（改批次会破坏启动顺序）；
-- 不碰客户端 bundle 的内容与版本（rev 原样保留）；
+- 不改 combo 的 `rev`（`openWindow` 只替换正文，URL 原样保留）；
 - 不接管 `/api/*`（`/api/session/list` 仍有 0.36 MB，瘦身属于另一件事）。
+
+> **改了 `openWindow` 却没生效时看这条**：combo 响应带一年 `immutable`，而 `rev` 不变
+> （`rev` 由模块的文件元数据决定，不由改写后的正文决定）。所以改了本插件的配置、或把
+> `openWindow.enabled` 关掉，已经缓存过该 URL 的浏览器不会回来取新内容——需要硬刷新，
+> 或让模块自身的 rev 变化（重装/升级插件包）。

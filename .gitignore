@@ -10,6 +10,9 @@ desktop.ini
 # ---------- plugins/payload-diet（量化探针的产物）----------
 plugins/payload-diet/.measure/
 
+# ---------- plugins/mux-deflate（量化探针的产物）----------
+plugins/mux-deflate/.measure/
+
 # ---------- dsh-remote-android（Gradle / Android）----------
 .gradle/
 .kotlin/

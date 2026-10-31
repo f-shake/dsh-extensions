@@ -1,0 +1,3 @@
+- insert:
+    - id: mux-deflate
+      name: '@local/mux-deflate'

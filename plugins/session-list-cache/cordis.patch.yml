@@ -1,0 +1,3 @@
+- insert:
+    - id: session-list-cache
+      name: '@local/session-list-cache'

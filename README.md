@@ -11,7 +11,9 @@ dsh-extensions/
     ├── session-activity-order/ 侧栏排序：活跃工作区/会话自动置顶
     ├── composer-focus/        输入框交互：点按钮不拉键盘、滑聊天区收键盘、切会话不自动弹键盘
     ├── background-send/       插话即转后台：用户插话时把前台命令转到后台
-    └── payload-diet/          宿主侧减负：外置 combo 里的内联图、给静态资源补缓存头
+    ├── payload-diet/          宿主侧减负：外置 combo 里的内联图、给静态资源补缓存头、收窄会话首屏窗口
+    ├── mux-deflate/           宿主侧减负：给 /api/remote.mux 的 WebSocket 打开压缩
+    └── session-list-cache/    客户端减负：会话列表先用上次的结果出来，不等网络
 ```
 
 三部分是独立的交付物，各有自己的构建方式和部署位置，只是一起做版本管理。
@@ -49,7 +51,8 @@ powershell -NoProfile -File .\start-auth.ps1     # 前台启动（调试）
 
 插件是 DSH 的 Cordis bundle，安装到 profile 里生效
 （profile 目录 `~/.dsh/profiles/<名>`，依赖写成 `link:` 指向本仓库的目录）。
-多数是客户端插件，`payload-diet` 是宿主侧插件（跑在 dsh 进程里，接管 HTTP 路由）。
+多数是客户端插件；宿主侧（跑在 dsh 进程里）有三个：`payload-diet` 接管 HTTP 路由与
+combo 改写、`mux-deflate` 接管 WebSocket 压缩、`background-send` 处理插话转后台。
 
 ```powershell
 # 以 profile aa 为例

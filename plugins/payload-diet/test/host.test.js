@@ -9,6 +9,7 @@ import {
   assetFileName,
   createDietHandlers,
   externalizeDataUrls,
+  narrowOpenWindow,
   normalizeConfig,
   resolveShellRoot,
   rewriteIndexHtml,
@@ -691,4 +692,135 @@ test("apply：插件的 tap 真的会把 HTML 里的 combo 地址指过来", (t)
   apply(ctx, { shellRoot: root });
   const html = '<script src="plugins/??@deepseek-ai/dsh-client-modules/client.js&rev=1"></script>';
   assert.ok(server.taps[0](html).includes("dsh-diet/combo/??"));
+});
+
+// ---------------------------------------------------------------- 首屏窗口
+
+/** 会话控制器客户端包里那两处调用点的真实形状（缩进无关）。 */
+const OPEN_CALL = "await events.open(HISTORY_PAGE_OPTIONS);";
+const OLDER_CALL = "await events.prepend({ beforeSeq: this.baseSeq, ...HISTORY_PAGE_OPTIONS });";
+
+test("narrowOpenWindow：命中时换成给定参数，回补那一处不动", () => {
+  const source = `${OPEN_CALL}\n${OLDER_CALL}`;
+  const { code, applied } = narrowOpenWindow(source, { maxMessages: 60, minMessages: 12, minTurns: 2 });
+  assert.equal(applied, true);
+  assert.ok(code.includes("maxMessages: 60"));
+  assert.ok(code.includes("minMessages: 12"));
+  assert.ok(code.includes("minTurns: 2"));
+  assert.ok(!code.includes("events.open(HISTORY_PAGE_OPTIONS)"));
+  // 「加载更早」必须保持原样，否则点一次只补一点点。
+  assert.ok(code.includes(OLDER_CALL));
+});
+
+test("narrowOpenWindow：未命中时原样返回并给出原因", () => {
+  const source = "const a = 1;";
+  const result = narrowOpenWindow(source);
+  assert.equal(result.applied, false);
+  assert.equal(result.code, source);
+  assert.match(result.reason, /未命中/);
+});
+
+test("narrowOpenWindow：锚点出现两次时放弃改写", () => {
+  // 上游若重构出两处相同调用，盲目替换会把回补也改掉，那时宁可不动。
+  const source = `${OPEN_CALL}\n${OPEN_CALL}`;
+  const result = narrowOpenWindow(source);
+  assert.equal(result.applied, false);
+  assert.equal(result.code, source);
+  assert.match(result.reason, /2 次/);
+});
+
+test("narrowOpenWindow：开关关闭与非字符串输入都原样返回", () => {
+  assert.equal(narrowOpenWindow(OPEN_CALL, { enabled: false }).applied, false);
+  assert.equal(narrowOpenWindow(undefined).applied, false);
+  assert.equal(narrowOpenWindow(undefined).code, undefined);
+});
+
+test("narrowOpenWindow：越界参数被夹紧而不是退回默认", () => {
+  const loose = narrowOpenWindow(OPEN_CALL, { maxMessages: 900 }).code;
+  assert.ok(loose.includes("maxMessages: 500"));
+  const zero = narrowOpenWindow(OPEN_CALL, { maxMessages: 0, minMessages: 0, minTurns: 0 }).code;
+  assert.ok(zero.includes("maxMessages: 1"));
+  assert.ok(zero.includes("minMessages: 1"));
+  assert.ok(zero.includes("minTurns: 1"));
+});
+
+test("narrowOpenWindow：minMessages 不会超过 maxMessages", () => {
+  const code = narrowOpenWindow(OPEN_CALL, { maxMessages: 20, minMessages: 200 }).code;
+  assert.ok(code.includes("minMessages: 20"));
+});
+
+test("normalizeConfig：openWindow 默认 60 / 12 / 2 且开启", () => {
+  assert.deepEqual(normalizeConfig({}).openWindow, {
+    enabled: true,
+    maxMessages: 60,
+    minMessages: 12,
+    minTurns: 2,
+  });
+});
+
+test("normalizeConfig：openWindow 可关、可改，并被夹紧", () => {
+  assert.equal(normalizeConfig({ openWindow: { enabled: false } }).openWindow.enabled, false);
+  const config = normalizeConfig({ openWindow: { maxMessages: 999, minMessages: -5, minTurns: 99 } });
+  assert.equal(config.openWindow.maxMessages, 500);
+  // 负数按「没填」处理，退回默认而不是夹到 1：与其余数字项同一套语义。
+  assert.equal(config.openWindow.minMessages, 12);
+  assert.equal(config.openWindow.minTurns, 20);
+});
+
+test("combo：会话控制器的包里首屏窗口被改写", async () => {
+  const registry = registryOf(Buffer.from(`${OPEN_CALL}\n${OLDER_CALL}`));
+  const handlers = createDietHandlers({ registry });
+  const res = fakeRes();
+  const url = "/dsh-diet/combo/??@deepseek-ai/dsh-api-session-controller/client.js&rev=abc";
+  await handlers.combo(fakeReq("GET", url), res);
+  const body = res.body.toString("utf8");
+  assert.ok(body.includes("maxMessages: 60"));
+  assert.ok(body.includes(OLDER_CALL));
+  assert.equal(handlers.stats().windowsNarrowed, 1);
+  assert.equal(handlers.stats().windowsMissed, 0);
+});
+
+test("combo：别的 bundle 不改写，也不计入未命中", async () => {
+  const registry = registryOf(Buffer.from("const a = 1;"));
+  const handlers = createDietHandlers({ registry });
+  const res = fakeRes();
+  await handlers.combo(fakeReq("GET", "/dsh-diet/combo/??@deepseek-ai/dsh-api-gateway/client.js&rev=1"), res);
+  assert.equal(res.body.toString("utf8"), "const a = 1;");
+  assert.equal(handlers.stats().windowsNarrowed, 0);
+  assert.equal(handlers.stats().windowsMissed, 0);
+});
+
+test("combo：会话控制器包未命中时告警一次并原样返回", async () => {
+  const warnings = [];
+  const registry = registryOf(Buffer.from("const a = 1;"));
+  const handlers = createDietHandlers({ registry, logger: { warn: (m) => warnings.push(m) } });
+  const first = fakeRes();
+  const second = fakeRes();
+  // 两次必须用不同的 rev：同一个 URL 第二次会命中 combo 的 computed 缓存，
+  // 根本不会再走一遍 build，这条用例就测不到「只 warn 一次」。
+  await handlers.combo(fakeReq("GET", "/dsh-diet/combo/??@deepseek-ai/dsh-api-session-controller/client.js&rev=1"), first);
+  await handlers.combo(fakeReq("GET", "/dsh-diet/combo/??@deepseek-ai/dsh-api-session-controller/client.js&rev=2"), second);
+  assert.equal(first.body.toString("utf8"), "const a = 1;");
+  assert.equal(second.body.toString("utf8"), "const a = 1;");
+  assert.equal(handlers.stats().windowsMissed, 2);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /首屏窗口改写未命中/);
+});
+
+test("combo：openWindow.enabled=false 时窗口保持上游原样", async () => {
+  const registry = registryOf(Buffer.from(OPEN_CALL));
+  const handlers = createDietHandlers({ registry, openWindow: { enabled: false, maxMessages: 60, minMessages: 12, minTurns: 2 } });
+  const res = fakeRes();
+  await handlers.combo(fakeReq("GET", "/dsh-diet/combo/??@deepseek-ai/dsh-api-session-controller/client.js&rev=1"), res);
+  assert.ok(res.body.toString("utf8").includes("events.open(HISTORY_PAGE_OPTIONS)"));
+});
+
+test("apply：首屏窗口配置真的透传下去了", async () => {
+  const server = fakeServer();
+  const { ctx } = fakeContext(server, registryOf(Buffer.from(OPEN_CALL)));
+  apply(ctx, { shellCache: false, openWindow: { maxMessages: 40, minMessages: 8 } });
+  const combo = server.routes.find((route) => route.path === "/dsh-diet/combo");
+  const res = fakeRes();
+  await combo.handler(fakeReq("GET", "/dsh-diet/combo/??@deepseek-ai/dsh-api-session-controller/client.js&rev=1"), res);
+  assert.ok(res.body.toString("utf8").includes("maxMessages: 40"));
 });

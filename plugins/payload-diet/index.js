@@ -82,6 +82,29 @@ const DEFAULT_ASSET_POOL_BYTES = 64 * 1024 * 1024;
 const MISSING_ASSET_LOG_LIMIT = 5;
 
 /**
+ * 会话首次打开时那个调用的原文。客户端包里 `open()` 用它取尾页，
+ * 而 `loadOlder()` 用的是另一个调用点（`events.prepend`），所以只改这一处
+ * 就能让首屏变窄、向上回补保持原样。
+ */
+const OPEN_WINDOW_CALL = "events.open(HISTORY_PAGE_OPTIONS)";
+
+/** 首屏窗口默认值：60 条消息、至少跨 2 个 Turn，实测首包约 0.47 MB。 */
+const DEFAULT_OPEN_MAX_MESSAGES = 60;
+const DEFAULT_OPEN_MIN_MESSAGES = 12;
+const DEFAULT_OPEN_MIN_TURNS = 2;
+
+/**
+ * 改写后的上限，与上游客户端的默认页大小（500）对齐。
+ *
+ * 服务端只校验正整数，500 并不是硬上限；这里设上限是因为本插件的职责是**收窄**
+ * 首屏，不允许反过来把窗口配得比默认还大。
+ */
+const MAX_OPEN_MESSAGES = 500;
+
+/** 会话控制器的客户端包在 combo URL 里的标识；首屏窗口只在这一个包里改写。 */
+const SESSION_CONTROLLER_MODULE = "dsh-api-session-controller";
+
+/**
  * 内联资源识别式。只认 base64 的 data URI，允许中间夹 `charset=` 之类的可选参数；
  * 非 base64（如 `data:image/svg+xml,%3Csvg`）不碰，那类本来就能被 gzip 压。
  */
@@ -144,12 +167,55 @@ function numberOption(value, fallback) {
 }
 
 /**
+ * 把数值夹到区间内。配置越界时取最近的合法值，而不是退回默认——
+ * 用户写了 `minMessages: 900`，本意显然是「多要一点」，不是「用默认的 12」。
+ * @param {number} value - 已归一化的数值。
+ * @param {number} low - 下界。
+ * @param {number} high - 上界。
+ * @returns {number} 夹紧后的值。
+ */
+function clampOption(value, low, high) {
+  return Math.min(Math.max(value, low), high);
+}
+
+/**
+ * 把「会话首次打开」的窗口参数换窄。
+ *
+ * 只替换 `events.open(HISTORY_PAGE_OPTIONS)` 这一处调用：`loadOlder()` 走的是
+ * `events.prepend(...)`，「加载更早」拿到的仍是上游那套大页参数。锚点必须唯一命中
+ * 才动手——上游如果重构出两处相同调用，盲目替换会把回补也一起改掉，那时宁可放弃。
+ * @param {string} code - 客户端 bundle 原文。
+ * @param {{ enabled?: boolean, maxMessages?: number, minMessages?: number, minTurns?: number }} [options] - 窗口参数。
+ * @returns {{ code: string, applied: boolean, reason?: string }} 改写结果。
+ */
+export function narrowOpenWindow(code, options = {}) {
+  if (options.enabled === false) return { code, applied: false };
+  if (typeof code !== "string") return { code, applied: false, reason: "非字符串" };
+
+  const occurrences = code.split(OPEN_WINDOW_CALL).length - 1;
+  if (occurrences === 0) return { code, applied: false, reason: "未命中" };
+  if (occurrences > 1) return { code, applied: false, reason: `锚点出现 ${occurrences} 次` };
+
+  const maxMessages = clampOption(numberOption(options.maxMessages, DEFAULT_OPEN_MAX_MESSAGES), 1, MAX_OPEN_MESSAGES);
+  const minMessages = clampOption(numberOption(options.minMessages, DEFAULT_OPEN_MIN_MESSAGES), 1, maxMessages);
+  const minTurns = clampOption(numberOption(options.minTurns, DEFAULT_OPEN_MIN_TURNS), 1, 20);
+  const call = `events.open({ maxMessages: ${maxMessages}, turnWindow: { minMessages: ${minMessages}, minTurns: ${minTurns} } })`;
+  return { code: code.replace(OPEN_WINDOW_CALL, call), applied: true };
+}
+
+/**
  * 校验并补全插件配置。配置来自 Loader 行，可能是空对象或非对象。
  * @param {unknown} raw - Loader 传入的原始配置。
- * @returns {{ enabled: boolean, minAssetBytes: number, assetPoolBytes: number, shellCache: boolean, shellRoot: string | undefined }} 归一化后的配置。
+ * @returns {{ enabled: boolean, minAssetBytes: number, assetPoolBytes: number, shellCache: boolean, shellRoot: string | undefined, openWindow: { enabled: boolean, maxMessages: number, minMessages: number, minTurns: number } }} 归一化后的配置。
  */
 export function normalizeConfig(raw) {
   const source = raw !== null && typeof raw === "object" ? raw : {};
+  const window = source.openWindow !== null && typeof source.openWindow === "object" ? source.openWindow : {};
+  const maxMessages = clampOption(
+    numberOption(window.maxMessages, DEFAULT_OPEN_MAX_MESSAGES),
+    1,
+    MAX_OPEN_MESSAGES,
+  );
   return {
     enabled: source.enabled !== false,
     minAssetBytes: numberOption(source.minAssetBytes, DEFAULT_MIN_ASSET_BYTES),
@@ -159,6 +225,12 @@ export function normalizeConfig(raw) {
       typeof source.shellRoot === "string" && source.shellRoot.trim() !== ""
         ? resolve(source.shellRoot.trim())
         : undefined,
+    openWindow: {
+      enabled: window.enabled !== false,
+      maxMessages,
+      minMessages: clampOption(numberOption(window.minMessages, DEFAULT_OPEN_MIN_MESSAGES), 1, maxMessages),
+      minTurns: clampOption(numberOption(window.minTurns, DEFAULT_OPEN_MIN_TURNS), 1, 20),
+    },
   };
 }
 
@@ -324,6 +396,12 @@ export function createDietHandlers({
   distRoot,
   minAssetBytes = DEFAULT_MIN_ASSET_BYTES,
   assetPoolBytes = DEFAULT_ASSET_POOL_BYTES,
+  openWindow = {
+    enabled: true,
+    maxMessages: DEFAULT_OPEN_MAX_MESSAGES,
+    minMessages: DEFAULT_OPEN_MIN_MESSAGES,
+    minTurns: DEFAULT_OPEN_MIN_TURNS,
+  },
   logger,
 } = {}) {
   if (registry === null || typeof registry !== "object" || typeof registry.bundleResource !== "function") {
@@ -335,6 +413,7 @@ export function createDietHandlers({
   const missingLogged = new Set();
   const assetsRoot = distRoot === undefined ? undefined : join(distRoot, "assets");
   let assetBytes = 0;
+  let windowWarned = false;
   const stats = {
     combos: 0,
     assetRefs: 0,
@@ -346,6 +425,8 @@ export function createDietHandlers({
     cacheHits: 0,
     droppedAssets: 0,
     warmed: 0,
+    windowsNarrowed: 0,
+    windowsMissed: 0,
   };
 
   /** 收下一条外置资源；池满时返回 false，调用方据此保留内联（不整批放弃）。 */
@@ -381,6 +462,21 @@ export function createDietHandlers({
         shouldExternalize: (asset) => keepAsset(asset),
       });
       body = Buffer.from(result.code, "utf8");
+      // 首屏窗口只对会话控制器的客户端包有意义：别的 bundle 里没有那个调用点，
+      // 未命中是常态，不该当成异常报警。
+      if (openWindow.enabled && url.includes(SESSION_CONTROLLER_MODULE)) {
+        const narrowed = narrowOpenWindow(result.code, openWindow);
+        if (narrowed.applied) {
+          body = Buffer.from(narrowed.code, "utf8");
+          stats.windowsNarrowed += 1;
+        } else {
+          stats.windowsMissed += 1;
+          if (!windowWarned) {
+            windowWarned = true;
+            logger?.warn?.(`payload-diet：首屏窗口改写未命中（${narrowed.reason}），已按原样返回`);
+          }
+        }
+      }
       externalized = result.assets.length;
       saved = result.savedBytes;
       stats.combos += 1;
@@ -580,6 +676,7 @@ export function apply(ctx, rawConfig) {
     distRoot,
     minAssetBytes: config.minAssetBytes,
     assetPoolBytes: config.assetPoolBytes,
+    openWindow: config.openWindow,
     logger: ctx.logger,
   });
   ctx.effect(
