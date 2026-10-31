@@ -1,0 +1,26 @@
+{
+  "name": "@local/payload-diet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "把 Web 首屏内联的 base64 图片外置，并给内容哈希资源补上 immutable 缓存头",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "test",
+    "scripts"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "license": "MIT"
+}

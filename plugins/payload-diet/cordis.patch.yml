@@ -1,0 +1,7 @@
+- insert:
+    - id: payload-diet
+      name: '@local/payload-diet'
+      config:
+        enabled: true
+        minAssetBytes: 2048
+        shellCache: true

@@ -10,7 +10,8 @@ dsh-extensions/
     ├── mobile-fit/            窄屏适配：弹窗/设置面板不超屏
     ├── session-activity-order/ 侧栏排序：活跃工作区/会话自动置顶
     ├── composer-focus/        输入框交互：点按钮不拉键盘、滑聊天区收键盘、切会话不自动弹键盘
-    └── background-send/       插话即转后台：用户插话时把前台命令转到后台
+    ├── background-send/       插话即转后台：用户插话时把前台命令转到后台
+    └── payload-diet/          宿主侧减负：外置 combo 里的内联图、给静态资源补缓存头
 ```
 
 三部分是独立的交付物，各有自己的构建方式和部署位置，只是一起做版本管理。
@@ -46,12 +47,13 @@ powershell -NoProfile -File .\start-auth.ps1     # 前台启动（调试）
 
 ## plugins
 
-插件是 DSH 的 Cordis 客户端 bundle，安装到 profile 里生效
+插件是 DSH 的 Cordis bundle，安装到 profile 里生效
 （profile 目录 `~/.dsh/profiles/<名>`，依赖写成 `link:` 指向本仓库的目录）。
+多数是客户端插件，`payload-diet` 是宿主侧插件（跑在 dsh 进程里，接管 HTTP 路由）。
 
 ```powershell
 # 以 profile aa 为例
-node C:\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js plugin --profile aa add "@local/mobile-fit@link:<repo>/plugins/mobile-fit"
+node C:\Running\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js plugin --profile aa add "@local/mobile-fit@link:<repo>/plugins/mobile-fit"
 ```
 
 同时在 profile 的 `package.json` 的 `dsh.profile.bundles` 里加上包名，客户端才会加载。

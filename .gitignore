@@ -7,6 +7,9 @@ Thumbs.db
 desktop.ini
 .vscode/
 
+# ---------- plugins/payload-diet（量化探针的产物）----------
+plugins/payload-diet/.measure/
+
 # ---------- dsh-remote-android（Gradle / Android）----------
 .gradle/
 .kotlin/
