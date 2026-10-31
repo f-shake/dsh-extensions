@@ -1,0 +1,33 @@
+{
+  "name": "@local/vibe-phase-bar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "vibe coding 五阶段面包屑：输入框上方的阶段条、左下角的启动图标，以及一个给模型用的阶段请求工具",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "license": "MIT"
+}
