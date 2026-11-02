@@ -8,8 +8,21 @@ window.__ModuleLoader__.load({
     const NS = 'mobile-fit';
     /** The frame width below which the shipped layout uses its narrow column. */
     const MOBILE_QUERY = '(max-width: 1023.98px)';
-    /** The shell frame is the only element that carries the inline grid tracks. */
-    const FRAME_SELECTOR = '[style*="grid-template-columns"]';
+    /**
+     * 外壳框架用本插件打的标记来认，不再靠内联样式匹配：dockkit 的面板容器同样
+     * 带内联 grid-template-columns，按样式匹配会把右栏也当成左抽屉拽到左边。
+     */
+    const FRAME_ATTRIBUTE = 'data-msd-shell-frame';
+    const FRAME_SELECTOR = '[' + FRAME_ATTRIBUTE + ']';
+    /** 框架把这块遮罩层作为直接子节点渲染，用它定位框架本身。 */
+    const OVERLAY_SELECTOR = '[data-shell-overlay]';
+    /** 右栏打开/收起由面板自带的按钮驱动。 */
+    const RIGHT_OPEN_SELECTOR = '[data-sidebar-right-expand]';
+    const RIGHT_CLOSE_SELECTOR = '[data-sidebar-right-toggle]';
+    /** 宿主在面板元素上公开的开合状态，比按钮在不在更可靠。 */
+    const RIGHT_PANEL_OPEN_SELECTOR = '[data-sidebar-right-panel][data-sidebar-right-open]';
+    /** 面板想展开、外壳却因宽度门槛不给轨道时，用它把抽屉顶出来。 */
+    const RIGHT_WANT_ATTRIBUTE = 'data-msd-right-want';
     /** Style element marker so one copy exists per page. */
     const STYLE_TAG = 'mobile-fit';
 
@@ -38,10 +51,10 @@ window.__ModuleLoader__.load({
   html {
     height: var(--x-msd-app-height, 100%) !important;
   }
-  [style*="grid-template-columns"] {
-    grid-template-columns: 0 minmax(0, 1fr) auto !important;
+  [data-msd-shell-frame] {
+    grid-template-columns: 0 minmax(0, 1fr) 0 !important;
   }
-  [style*="grid-template-columns"] > *:first-child {
+  [data-msd-shell-frame] > *:first-child {
     position: absolute !important;
     top: 0 !important;
     bottom: 0 !important;
@@ -52,25 +65,62 @@ window.__ModuleLoader__.load({
     transform: translateX(-100%);
     transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1);
   }
-  [style*="grid-template-columns"]:not([data-sidebar-collapsed]) > *:first-child {
+  [data-msd-shell-frame]:not([data-sidebar-collapsed]) > *:first-child {
     transform: translateX(0);
     box-shadow: 0 18px 48px rgb(0 0 0 / 0.28);
   }
-  [style*="grid-template-columns"] > *:nth-child(2) {
+  /*
+   * 右栏在这个宽度以下一律收成抽屉。不能再按宿主的 768 分界拆成两段：外壳的
+   * grid-template-columns 只能整体覆盖，第三列一旦不是 0，宿主算好的停靠轨道就被
+   * 丢掉，而面板是绝对定位的、不会撑开 auto 轨道，结果面板压在会话上、又因为没
+   * 有 z-index 落到遮罩层之下，点都点不动。
+   */
+  [data-msd-shell-frame] > *:nth-child(3) {
+    position: absolute !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    right: 0 !important;
+    width: min(92vw, 380px) !important;
+    max-width: 100vw;
+    z-index: 41 !important;
+    overflow: hidden !important;
+    transform: translateX(100%);
+    transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+  /*
+   * 右栏面板自己按整屏宽度定位、锚在列尾，放进抽屉会向左溢出，在视口右边留一条。
+   * 收成与抽屉同宽即可。
+   */
+  [data-msd-shell-frame] > *:nth-child(3) [data-sidebar-right-panel] {
+    width: 100% !important;
+    max-width: 100% !important;
+    left: 0 !important;
+    right: auto !important;
+  }
+  [data-msd-shell-frame]:not([data-rightbar-collapsed]) > *:nth-child(3) {
+    transform: translateX(0);
+    box-shadow: -18px 0 48px rgb(0 0 0 / 0.28);
+  }
+  /*
+   * 外壳有宽度门槛（中栏至少 400px + 右栏 300px），窄屏上永远不满足，面板即使
+   * 要求展开也没有轨道。这里按面板自己的开合状态放行。
+   */
+  [data-msd-shell-frame][data-msd-right-want] > *:nth-child(3) {
+    transform: translateX(0);
+    box-shadow: -18px 0 48px rgb(0 0 0 / 0.28);
+  }
+  [data-msd-shell-frame] > *:nth-child(2) {
     grid-column: 1 / 3 !important;
     grid-row: 1 !important;
   }
-  [style*="grid-template-columns"] > *:nth-child(3) {
-    grid-column: 3 !important;
-    grid-row: 1 !important;
-  }
-  [style*="grid-template-columns"] > *:nth-child(4) {
+  [data-msd-shell-frame] > *:nth-child(4) {
     grid-column: 1 / -1 !important;
     grid-row: 2 !important;
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  [style*="grid-template-columns"] > *:first-child {
+  [data-msd-shell-frame] > *:first-child,
+  [data-msd-shell-frame] > *:nth-child(3) {
     transition: none !important;
   }
 }
@@ -183,12 +233,72 @@ window.__ModuleLoader__.load({
 }
 `;
 
-    /** Frames are the only elements with inline column tracks; read one. */
+    /**
+     * 面板自己是否要求展开。用宿主写在面板元素上的开合标记判断：拿「展开按钮
+     * 在不在」推断会误判——切到全局面板（设置、插件页）时会话头部会卸载，
+     * 按钮随之消失，但面板并没有要求展开。
+     */
+    function rightbarWanted() {
+      return document.querySelector(RIGHT_PANEL_OPEN_SELECTOR) !== null;
+    }
+
+    /**
+     * 给当前挂载的外壳框架打标记，所有窄屏规则都挂在这个标记上，并同步右栏的
+     * 「面板想展开」状态。每次写属性前先比一次，避免无谓的 DOM 写入。
+     */
+    function syncFrame() {
+      const overlay = document.querySelector(OVERLAY_SELECTOR);
+      const frame = overlay === null ? null : overlay.parentElement;
+      if (frame === null || frame === undefined) return;
+      if (!frame.hasAttribute(FRAME_ATTRIBUTE)) frame.setAttribute(FRAME_ATTRIBUTE, '');
+      const wanted = rightbarWanted();
+      if (frame.hasAttribute(RIGHT_WANT_ATTRIBUTE) !== wanted) {
+        frame.toggleAttribute(RIGHT_WANT_ATTRIBUTE, wanted);
+      }
+    }
+
+    /**
+     * 框架与面板状态都可能晚于插件变化，跟着 DOM 变化同步。聊天流式输出会持续
+     * 产生 childList 变更，所以合并到每帧一次，不在每个 mutation 批次里扫 DOM。
+     * 面板的开合同样要跟：有时只改属性、不增删节点（没有会话头部的宽度下用快捷键
+     * 切换右栏），只监听 childList 会漏掉。
+     */
+    function installFrameTag() {
+      let queued = 0;
+      const schedule = () => {
+        if (queued !== 0) return;
+        queued = window.requestAnimationFrame(() => {
+          queued = 0;
+          syncFrame();
+        });
+      };
+      syncFrame();
+      const observer = new MutationObserver(schedule);
+      observer.observe(document.body, {
+        childList: true,
+        attributes: true,
+        attributeFilter: ['data-sidebar-right-open'],
+        subtree: true,
+      });
+      return () => {
+        observer.disconnect();
+        if (queued !== 0) window.cancelAnimationFrame(queued);
+        const frame = document.querySelector(FRAME_SELECTOR);
+        if (frame !== null) {
+          frame.removeAttribute(FRAME_ATTRIBUTE);
+          frame.removeAttribute(RIGHT_WANT_ATTRIBUTE);
+        }
+      };
+    }
+
+    /** Read the frame's narrow state without touching its DOM. */
     function readFrame() {
       const frame = document.querySelector(FRAME_SELECTOR);
       return {
         compact: window.matchMedia(MOBILE_QUERY).matches,
-        open: frame !== null && !frame.hasAttribute('data-sidebar-collapsed'),
+        left: frame !== null && !frame.hasAttribute('data-sidebar-collapsed'),
+        right: frame !== null &&
+          (!frame.hasAttribute('data-rightbar-collapsed') || frame.hasAttribute(RIGHT_WANT_ATTRIBUTE)),
       };
     }
 
@@ -262,7 +372,7 @@ window.__ModuleLoader__.load({
         const observer = new MutationObserver(update);
         observer.observe(document.body, {
           attributes: true,
-          attributeFilter: ['data-sidebar-collapsed'],
+          attributeFilter: ['data-sidebar-collapsed', 'data-rightbar-collapsed', RIGHT_WANT_ATTRIBUTE, FRAME_ATTRIBUTE],
           subtree: true,
         });
         const query = window.matchMedia(MOBILE_QUERY);
@@ -281,21 +391,23 @@ window.__ModuleLoader__.load({
     const SWIPE_DOMINANCE = 0.7;
 
     /**
-     * Decide what one touch gesture means for the drawer.
-     * @param gesture - start x, travel from it, and elapsed milliseconds.
-     * @param open - whether the drawer is open while the gesture runs.
-     * @param viewportWidth - current viewport width in px.
-     * @returns 'open', 'close', or null when the gesture belongs to someone else.
+     * 判断一次触摸手势对两个抽屉意味着什么。
+     * @param gesture - 起点 x、相对起点的位移、耗时。
+     * @param drawersOf - 取当前开合状态的函数，只在线性阈值都通过后才调用。
+     * @param viewportWidth - 当前视口宽度（px）。
+     * @returns 抽屉动作，或 null（这次手势不归抽屉管）。
      */
-    function swipeIntent(gesture, open, viewportWidth) {
+    function swipeIntent(gesture, drawersOf, viewportWidth) {
       const { startX, dx, dy, dt } = gesture;
       if (dt > SWIPE_MAX_MS) return null;
       if (Math.abs(dx) < SWIPE_MIN) return null;
       if (Math.abs(dy) > Math.abs(dx) * SWIPE_DOMINANCE) return null;
-      if (open) return dx < 0 ? 'close' : null;
-      if (dx <= 0) return null;
-      if (startX > viewportWidth * 0.5) return null;
-      return 'open';
+      const drawers = drawersOf();
+      /* 同时只会开一个抽屉：先处理收起，再按起手位置决定展开哪一侧。 */
+      if (drawers.right) return dx > 0 ? 'close-right' : null;
+      if (drawers.left) return dx < 0 ? 'close-left' : null;
+      if (startX > viewportWidth * 0.5) return dx < 0 ? 'open-right' : null;
+      return dx > 0 ? 'open-left' : null;
     }
 
     /** Horizontal scrollers keep their own drags: code blocks, tables, rails. */
@@ -312,15 +424,16 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Touch navigation for narrow viewports: swipe right to reveal the drawer,
-     * swipe left to dismiss it. Listeners never cancel scrolling.
-     * @param enabled - whether the narrow layout is active.
-     * @param open - whether the drawer is open.
-     * @param toggle - the drawer action.
+     * 窄屏触摸导航：左半屏向右滑展开左抽屉，右半屏向左滑展开右抽屉，抽屉开着时
+     * 反向滑动收起。监听一律 passive，不取消滚动。
+     * 抽屉状态在手势发生的瞬间现读，不用渲染时的快照——否则刚收起就反向滑动会
+     * 撞上还没刷新的旧状态。
+     * @param enabled - 窄屏布局是否生效。
+     * @param run - 执行手势判定出来的动作。
      */
-    function useSwipeGesture(enabled, open, toggle) {
-      const toggleRef = React.useRef(toggle);
-      toggleRef.current = toggle;
+    function useSwipeGesture(enabled, run) {
+      const runRef = React.useRef(run);
+      runRef.current = run;
       React.useEffect(() => {
         if (!enabled) return undefined;
         let start = null;
@@ -347,12 +460,12 @@ window.__ModuleLoader__.load({
               dy: touch.clientY - start.y,
               dt: Date.now() - start.at,
             },
-            open,
+            readFrame,
             window.innerWidth,
           );
           if (intent === null) return;
           start = null;
-          toggleRef.current();
+          runRef.current(intent);
         };
         const onEnd = () => {
           start = null;
@@ -367,7 +480,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('touchend', onEnd);
           document.removeEventListener('touchcancel', onEnd);
         };
-      }, [enabled, open]);
+      }, [enabled]);
     }
 
     /*
@@ -395,11 +508,27 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /** 点一下页面上已有的控件：右栏的开关归面板自己管，本插件只替用户点它。 */
+    function clickFirst(selector) {
+      const element = document.querySelector(selector);
+      if (element instanceof HTMLElement) element.click();
+    }
+
+    /**
+     * 抽屉动作。实现由 apply 注入，组件层直接调用，不走 slot 的参数传递：
+     * 这样手势、图标按钮和遮罩用的是同一条实现。
+     */
+    const drawers = {
+      toggleLeft: () => {},
+      openRight: () => {},
+      closeRight: () => {},
+    };
+
     /**
      * Header leading seat: the brand logo that opens the sidebar on narrow
      * viewports, rendered before the Session title.
      */
-    function SidebarSeat({ t, toggle }) {
+    function SidebarSeat({ t }) {
       const frame = useFrameState();
       if (!frame.compact) return null;
       return h(
@@ -407,49 +536,82 @@ window.__ModuleLoader__.load({
         {
           type: 'button',
           className: 'x-msd-seat',
-          'aria-label': t(frame.open ? 'close' : 'open'),
-          title: t(frame.open ? 'close' : 'open'),
+          'aria-label': t(frame.left ? 'close' : 'open'),
+          title: t(frame.left ? 'close' : 'open'),
           onClick: () => {
-            toggle();
+            drawers.toggleLeft();
           },
         },
         h(BrandMark),
       );
     }
 
-    /** The drawer's dismissal surface; also ends the drawer on navigation. */
-    function DrawerScrim({ toggle, useSessions, usePanelInfo }) {
+    /** 两个抽屉的关闭层；切换会话或面板时也由它收口。 */
+    function DrawerScrim({ useSessions, usePanelInfo }) {
       const frame = useFrameState();
       const session = useSessions(selectCurrentSession);
       const panel = usePanelInfo((info) => (info ? info.activePanelId : null));
       const seen = React.useRef({ session, panel });
 
-      useSwipeGesture(frame.compact, frame.open, toggle);
+      const run = React.useCallback((action) => {
+        if (action === 'open-right') drawers.openRight();
+        else if (action === 'close-right') drawers.closeRight();
+        else drawers.toggleLeft();
+      }, []);
+
+      useSwipeGesture(frame.compact, run);
+
+      const shown = frame.compact && (frame.left || frame.right);
 
       React.useEffect(() => {
         const previous = seen.current;
         seen.current = { session, panel };
-        if (!frame.compact || !frame.open) return;
-        if (previous.session !== session || previous.panel !== panel) toggle();
-      }, [frame.compact, frame.open, panel, session, toggle]);
+        if (!frame.compact) return;
+        if (previous.session === session && previous.panel === panel) return;
+        if (frame.left) drawers.toggleLeft();
+        if (frame.right) drawers.closeRight();
+      }, [frame.compact, frame.left, frame.right, panel, session]);
 
       React.useEffect(() => {
-        if (!frame.compact || !frame.open) return undefined;
+        if (!shown) return undefined;
         const onKeyDown = (event) => {
-          if (event.key === 'Escape') toggle();
+          if (event.key !== 'Escape') return;
+          if (frame.right) drawers.closeRight();
+          else if (frame.left) drawers.toggleLeft();
         };
         window.addEventListener('keydown', onKeyDown);
         return () => {
           window.removeEventListener('keydown', onKeyDown);
         };
-      }, [frame.compact, frame.open, toggle]);
+      }, [shown, frame.left, frame.right]);
 
-      if (!frame.compact || !frame.open) return null;
+      /*
+       * 右栏在这里是覆盖层：打开时把焦点移进面板，关闭时还给原来的元素。
+       * 不做焦点陷阱——面板内容归宿主所有，锁住 Tab 会和它自己的浮层打架。
+       */
+      const restoreFocus = React.useRef(null);
+      React.useEffect(() => {
+        if (!frame.compact || !frame.right) return undefined;
+        const panel = document.querySelector('[data-sidebar-right-panel]');
+        if (panel === null) return undefined;
+        const previous = document.activeElement;
+        restoreFocus.current = previous instanceof HTMLElement ? previous : null;
+        const target = panel.querySelector('button, [href], input, [tabindex]:not([tabindex="-1"])');
+        if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+        return () => {
+          const back = restoreFocus.current;
+          restoreFocus.current = null;
+          if (back !== null && back.isConnected) back.focus({ preventScroll: true });
+        };
+      }, [frame.compact, frame.right]);
+
+      if (!shown) return null;
       return h('div', {
         className: 'x-msd-scrim',
         'aria-hidden': 'true',
         onClick: () => {
-          toggle();
+          if (frame.right) drawers.closeRight();
+          else drawers.toggleLeft();
         },
       });
     }
@@ -457,12 +619,22 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale', 'layout'],
       apply(ctx) {
-        const face = () => ({
-          toggle: () => {
-            ctx.layout.toggleSidebar();
-          },
-        });
+        drawers.toggleLeft = () => {
+          ctx.layout.toggleSidebar();
+        };
+        drawers.openRight = () => {
+          clickFirst(RIGHT_OPEN_SELECTOR);
+        };
+        /*
+         * 面板上的按钮是开关，不是关闭。状态快照可能比真实 DOM 慢一拍，直接点
+         * 下去会把已收起的面板重新打开，所以点之前先确认它确实开着。
+         */
+        drawers.closeRight = () => {
+          if (document.querySelector(RIGHT_PANEL_OPEN_SELECTOR) === null) return;
+          clickFirst(RIGHT_CLOSE_SELECTOR);
+        };
         ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'mobile-fit: dictionaries');
+        ctx.effect(() => installFrameTag(), 'mobile-fit: shell frame tag');
         ctx.effect(() => installKeyboardFit(), 'mobile-fit: keyboard fit');
         ctx.effect(() => {
           if (document.querySelector('style[data-plugin-css="' + STYLE_TAG + '"]') !== null) return undefined;
@@ -480,7 +652,6 @@ window.__ModuleLoader__.load({
             {
               name: 'conversation.header.leading',
               locale: NS,
-              inject: face,
             },
             SidebarSeat,
           ),
@@ -492,7 +663,6 @@ window.__ModuleLoader__.load({
               id: 'mobile-fit',
               order: 90,
               locale: NS,
-              inject: face,
             },
             DrawerScrim,
           ),
