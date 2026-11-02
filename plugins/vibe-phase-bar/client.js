@@ -223,7 +223,10 @@ window.__ModuleLoader__.load({
       tag.dataset.plugin = '@local/vibe-phase-bar';
       tag.dataset.pluginCss = STYLE_ID;
       tag.textContent = `
-[data-vibe-phase]{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:2px 14px;font-size:12px;line-height:1.4;color:var(--dsw-alias-label-primary,#14181f)}
+/* 与输入框卡片同盒：卡片在 .uV2eYG_root（padding:0 side-clearance）里居中且
+   max-width:card-max-width，所以 100% 要扣掉两侧 side-clearance、限宽用同一变量、margin auto 居中，
+   左右边沿才与输入框严丝合缝（wide 与 narrow 两种断点都成立）。 */
+[data-vibe-phase]{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:calc(100% - var(--dsh-composer-side-clearance,16px) * 2);max-width:var(--dsh-composer-card-max-width);margin:0 auto;min-width:0;padding:2px 0;font-size:12px;line-height:1.4;color:var(--dsw-alias-label-primary,#14181f)}
 [data-vibe-phase] .vpb-track{display:flex;align-items:center;gap:4px;flex:1;min-width:0;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none}
 [data-vibe-phase] .vpb-track::-webkit-scrollbar{display:none}
 [data-vibe-phase] .vpb-chip{flex:0 0 auto;border:0;background:transparent;color:inherit;font:inherit;padding:3px 9px;border-radius:999px;cursor:pointer;white-space:nowrap;transition:background .15s ease,color .15s ease,opacity .15s ease}
