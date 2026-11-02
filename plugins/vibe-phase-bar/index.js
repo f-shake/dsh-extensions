@@ -3,11 +3,12 @@
  *
  * 为什么状态放在宿主内存、而不是会话投影：外部插件不允许写自定义会话事件
  * （`appendPluginRecord` 只对 packages/experimental 下的包开放），投影没有可折叠的
- * 依据。阶段只服务「当前活着的宿主进程」，重启后从图标重新开始是已知取舍。
+ * 依据。阶段只服务「当前活着的宿主进程」，重启后按钮回到「开始」是已知取舍。
  *
  * 为什么确认走 HTTP 而不是客户端直接提交：点击要同时做两件事——给模型发一条
  * 用户消息、把状态推进到目标阶段。放在宿主里两者才是一次原子动作，也不会覆盖
- * 用户正在写的草稿。启动则相反，必须走客户端提交，因为新会话还没有 agent。
+ * 用户正在写的草稿。「开条」则相反，它不需要发给模型任何东西，所以是另一条不发
+ * 消息的路由，只把状态建出来。
  */
 
 import { randomUUID } from "node:crypto";
@@ -23,12 +24,31 @@ const PHASE_NAMES = Object.freeze({
 
 const MIN_PHASE = 1;
 const MAX_PHASE = 5;
+
+/**
+ * 阶段四的三种验证方式。顺序即弹框顺序、也是写进消息的顺序。
+ * id 会存进状态并由客户端回显，属于稳定契约：改 id 等于改数据结构。
+ */
+const VERIFY_METHODS = Object.freeze([
+  { id: "unit", label: "全量单元测试" },
+  { id: "e2e", label: "端到端验证" },
+  { id: "release", label: "发布测试" },
+]);
+
+const VERIFY_IDS = VERIFY_METHODS.map((item) => item.id);
+
+/** 分两步走时，第一步只做界面与演示数据——完整实现留给 2b。 */
+const DEV_SPLIT_A_TEXT =
+  "确认进入阶段 2a（开发·前端与设计）：这一轮只做界面与交互——布局、样式、演示数据把流程走通，做完停下来把设计给我看；完整实现与业务逻辑留到 2b。";
+
+/** 2a 看完之后再点「开发」，进入完整实现。 */
+const DEV_STEP_B_TEXT = "确认进入阶段 2b（开发·完整实现）：按已确认的设计一次性做完完整实现与单元测试。";
 const ROUTE_PREFIX = "/vibe-phase";
 const DEFAULT_COOLDOWN_MS = 2000;
 const MAX_BODY_BYTES = 8192;
 
 export const name = "vibe-phase-bar";
-export const inject = ["tools"];
+export const inject = ["tools", "agents"];
 
 /**
  * 阶段短名。
@@ -61,6 +81,9 @@ export function createState() {
     authorized: false,
     precommitAt: 0,
     version: 1,
+    devMode: "single",
+    devStep: null,
+    verify: [],
   };
 }
 
@@ -93,6 +116,11 @@ export function applyEnter(state, phase) {
     precommit: keepCommitFlags ? state.precommit : false,
     authorized: keepCommitFlags ? state.authorized : false,
     precommitAt: keepCommitFlags ? state.precommitAt : 0,
+    // 走法只能由用户在弹框里选出来，工具 enter 无从得知，所以一律按一次性完成记；
+    // 保留旧值没有意义——能走到这里的 enter(2) 必然不是从 2a 里出来的。
+    devMode: "single",
+    devStep: null,
+    verify: keepCommitFlags ? [] : state.verify,
   });
 }
 
@@ -144,6 +172,9 @@ function planPrecommit(state, target, skipped, now) {
     precommit: true,
     authorized: false,
     precommitAt: now,
+    devMode: "single",
+    devStep: null,
+    verify: [],
   });
   const jumped = target - state.phase > 1 && skipped.length > 0;
   const head = jumped
@@ -173,6 +204,17 @@ function planCommitClick(state, now, cooldownMs) {
 }
 
 /**
+ * 把验证方式 id 翻成一句中文列举。
+ * @param {string[]} ids - 已归一的 id 列表。
+ * @returns {string} 顿号连接的显示名。
+ */
+export function verifyLabels(ids) {
+  return ids
+    .map((id) => VERIFY_METHODS.find((item) => item.id === id)?.label ?? id)
+    .join("、");
+}
+
+/**
  * 把一次点击解释成「新状态 + 要发给模型的话」。
  *
  * 这是整条流程里唯一允许推进阶段状态的地方：工具只能 enter/request，确认只能
@@ -181,12 +223,23 @@ function planCommitClick(state, now, cooldownMs) {
  * @param {number} target - 被点击的阶段。
  * @param {number} [now] - 当前时间。
  * @param {number} [cooldownMs] - 预提交冷却。
+ * @param {object} [options] - 弹框里选好的选项（`devSplit` / `verify`）。
  * @returns {{ state: object, message: string | null, reason?: string }} 结果。
  */
-export function planConfirm(state, target, now = Date.now(), cooldownMs = DEFAULT_COOLDOWN_MS) {
+export function planConfirm(
+  state,
+  target,
+  now = Date.now(),
+  cooldownMs = DEFAULT_COOLDOWN_MS,
+  options = {},
+) {
   if (!isValidPhase(target)) return { state, message: null, reason: "invalid-phase" };
 
   if (target === state.phase) {
+    // 停在 2a 再点「开发」：不再弹框，直接进 2b。
+    if (target === 2 && state.devMode === "split" && state.devStep === "a") {
+      return { state: commit(state, { pending: null, devStep: "b" }), message: DEV_STEP_B_TEXT };
+    }
     if (target !== MAX_PHASE) return { state, message: null, reason: "same-phase" };
     return planCommitClick(state, now, cooldownMs);
   }
@@ -199,28 +252,89 @@ export function planConfirm(state, target, now = Date.now(), cooldownMs = DEFAUL
       precommit: false,
       authorized: false,
       precommitAt: 0,
+      devMode: "single",
+      devStep: null,
+      verify: [],
     });
     return { state: next, message: `回到阶段 ${target}（${phaseName(target)}）重新走。` };
   }
 
   const jumped = range(state.phase + 1, target - 1);
   const skipped = unique([...state.skipped.filter((item) => item < target), ...jumped]);
+  const jumping = skipped.length > 0 && target - state.phase > 1;
+  // 从 2a 直接走掉：2b 没做，但阶段二并不算「跳过」，所以只提一句，不进跳过集合。
+  const stepNote = state.devStep === "a" && target > 2 ? "阶段 2b 未做。" : "";
 
-  if (target === MAX_PHASE) return planPrecommit(state, target, skipped, now);
+  if (target === MAX_PHASE) {
+    const plan = planPrecommit(state, target, skipped, now);
+    return { ...plan, message: `${plan.message}${stepNote}` };
+  }
 
-  const next = commit(state, {
-    phase: target,
-    pending: null,
-    skipped,
-    precommit: false,
-    authorized: false,
-    precommitAt: 0,
+  const head = jumping
+    ? `确认跳到阶段 ${target}（${phaseName(target)}），跳过阶段 ${skipped.join("、")}。`
+    : `确认进入阶段 ${target}（${phaseName(target)}）。`;
+  const done = (extra, message) => ({
+    state: commit(state, {
+      phase: target,
+      pending: null,
+      skipped,
+      precommit: false,
+      authorized: false,
+      precommitAt: 0,
+      // 离开阶段二就复位走法：阶段 3 之后再有 2a/2b 的角标就是残留。
+      ...(target === 2 ? {} : { devMode: "single", devStep: null }),
+      ...extra,
+    }),
+    message: `${message}${stepNote}`,
   });
-  const head =
-    skipped.length > 0 && target - state.phase > 1
-      ? `确认跳到阶段 ${target}（${phaseName(target)}），跳过阶段 ${skipped.join("、")}。`
-      : `确认进入阶段 ${target}（${phaseName(target)}）。`;
-  return { state: next, message: head };
+
+  if (target === 2) {
+    if (options.devSplit === true) {
+      return done({ devMode: "split", devStep: "a" }, DEV_SPLIT_A_TEXT);
+    }
+    return done({ devMode: "single", devStep: null }, head);
+  }
+
+  if (target === 4 && Array.isArray(options.verify) && options.verify.length > 0) {
+    const lead = jumping
+      ? `确认跳到阶段 4（验证），跳过阶段 ${skipped.join("、")}，`
+      : "确认进入阶段 4（验证），";
+    return done(
+      { verify: [...options.verify] },
+      `${lead}验证方式：${verifyLabels(options.verify)}。按选定方式执行，不要再问我选哪种。`,
+    );
+  }
+
+  return done({}, head);
+}
+
+/**
+ * 校验并归一化确认请求里的选项。
+ *
+ * 未提供与提供了非法值是两件事：前者表示「这次点击没有选项」，后者必须 400，
+ * 否则客户端传错字段会被静默当成「用户没选」，弹框也就白弹了。
+ * @param {unknown} raw - 请求体里的 options。
+ * @returns {{ ok: boolean, options: object }} 校验结果。
+ */
+export function normalizeOptions(raw) {
+  if (raw === undefined || raw === null) return { ok: true, options: {} };
+  if (typeof raw !== "object" || Array.isArray(raw)) return { ok: false, options: {} };
+
+  const options = {};
+  if (raw.devSplit !== undefined) {
+    if (typeof raw.devSplit !== "boolean") return { ok: false, options: {} };
+    options.devSplit = raw.devSplit;
+  }
+  if (raw.verify !== undefined) {
+    if (!Array.isArray(raw.verify)) return { ok: false, options: {} };
+    const unknown = raw.verify.some((id) => typeof id !== "string" || !VERIFY_IDS.includes(id));
+    if (unknown) return { ok: false, options: {} };
+    // 去重并按固定顺序排，免得同样的选择写成两种状态、两个不同版本的条。
+    const verify = VERIFY_METHODS.map((item) => item.id).filter((id) => raw.verify.includes(id));
+    if (verify.length === 0) return { ok: false, options: {} };
+    options.verify = verify;
+  }
+  return { ok: true, options };
 }
 
 /**
@@ -236,6 +350,9 @@ export function publicState(state) {
     precommit: state.precommit,
     authorized: state.authorized,
     version: state.version,
+    devMode: state.devMode,
+    devStep: state.devStep,
+    verify: state.verify,
   };
 }
 
@@ -349,14 +466,40 @@ async function readJson(req) {
 }
 
 /**
- * 构造 HTTP 处理入口。路由只有三条：读状态、确认、关闭。
+ * 只收 JSON 请求体。跨站的普通表单发不出 application/json（它会先触发预检），
+ * 这条挡的是拿 text/plain 直接打进来的伪造确认——那种请求能往对话里塞一条用户消息。
+ * @param {object} req - 请求对象。
+ * @returns {boolean} 是否为 JSON 请求。
+ */
+function isJsonRequest(req) {
+  const type = req?.headers?.["content-type"] ?? "";
+  return typeof type === "string" && type.toLowerCase().startsWith("application/json");
+}
+
+/**
+ * 请求体必须是普通对象：数组的 typeof 也是 object，得单独挡。
+ * @param {unknown} body - 解析结果。
+ * @returns {boolean} 是否可用。
+ */
+function isPlainBody(body) {
+  return body !== null && typeof body === "object" && !Array.isArray(body);
+}
+
+/**
+ * 构造 HTTP 处理入口。四条路由：读状态、确认、开条、关闭。
  * @param {object} options - 依赖。
  * @param {object} options.store - 状态表。
  * @param {() => number} [options.clock] - 时间来源。
  * @param {number} [options.cooldownMs] - 预提交冷却。
+ * @param {(sessionId: string) => object | undefined} [options.lookupAgent] - 取该会话当前的 agent。
  * @returns {{ handle: (req: object, res: object) => Promise<void> }} 处理入口。
  */
-export function createHandlers({ store, clock = Date.now, cooldownMs = DEFAULT_COOLDOWN_MS }) {
+export function createHandlers({
+  store,
+  clock = Date.now,
+  cooldownMs = DEFAULT_COOLDOWN_MS,
+  lookupAgent,
+}) {
   return {
     async handle(req, res) {
       const url = parseUrl(req.url);
@@ -369,20 +512,28 @@ export function createHandlers({ store, clock = Date.now, cooldownMs = DEFAULT_C
       }
 
       if (url.pathname === `${ROUTE_PREFIX}/confirm` && req.method === "POST") {
+        if (!isJsonRequest(req)) return send(res, 400, { ok: false, error: "bad-content-type" });
         const body = await readJson(req);
-        if (body === null || typeof body !== "object") return send(res, 400, { ok: false, error: "bad-body" });
+        if (!isPlainBody(body)) return send(res, 400, { ok: false, error: "bad-body" });
         const sessionId = typeof body.session === "string" ? body.session : "";
+        if (sessionId === "") return send(res, 400, { ok: false, error: "missing-session" });
         const entry = store.get(sessionId);
         if (entry === undefined) return send(res, 404, { ok: false, error: "unknown-session" });
 
-        const plan = planConfirm(entry.state, body.phase, clock(), cooldownMs);
+        const parsed = normalizeOptions(body.options);
+        if (!parsed.ok) return send(res, 400, { ok: false, error: "invalid-options" });
+
+        const plan = planConfirm(entry.state, body.phase, clock(), cooldownMs, parsed.options);
         if (plan.reason === "invalid-phase") return send(res, 400, { ok: false, error: "invalid-phase" });
 
         if (plan.message !== null) {
-          const agent = entry.agent;
+          // 条目里可能压根没挂 agent（条是按钮开出来的），也可能已经过时；
+          // 没挂时才向注册表回查一次并写回，实在拿不到就 409，让客户端提示用户。
+          const agent = entry.agent ?? lookupAgent?.(sessionId);
           if (agent === undefined || typeof agent.followup !== "function") {
             return send(res, 409, { ok: false, error: "agent-unavailable" });
           }
+          entry.agent = agent;
           try {
             // followup 收的是完整 UserMessage：缺 role/id 的消息会照原样写进历史，
             // 之后每个请求都会因「消息没有角色」被服务端拒绝（实测踩过一次）。
@@ -408,9 +559,23 @@ export function createHandlers({ store, clock = Date.now, cooldownMs = DEFAULT_C
         });
       }
 
-      if (url.pathname === `${ROUTE_PREFIX}/reset` && req.method === "POST") {
+      // 按钮在没有流程时点一下：只建状态、不发消息，所以不能借用 confirm。
+      if (url.pathname === `${ROUTE_PREFIX}/open` && req.method === "POST") {
+        if (!isJsonRequest(req)) return send(res, 400, { ok: false, error: "bad-content-type" });
         const body = await readJson(req);
-        if (body === null || typeof body !== "object") return send(res, 400, { ok: false, error: "bad-body" });
+        if (!isPlainBody(body)) return send(res, 400, { ok: false, error: "bad-body" });
+        const sessionId = typeof body.session === "string" ? body.session : "";
+        if (sessionId === "") return send(res, 400, { ok: false, error: "missing-session" });
+        // 已有条目时原样返回：重复点按钮不该把阶段重置回一。
+        // 顺手挂上会话当前的 agent，否则这条刚开出来的条点哪儿都是 409。
+        const entry = store.ensure(sessionId, lookupAgent?.(sessionId));
+        return send(res, 200, { ok: true, state: publicState(entry.state) });
+      }
+
+      if (url.pathname === `${ROUTE_PREFIX}/reset` && req.method === "POST") {
+        if (!isJsonRequest(req)) return send(res, 400, { ok: false, error: "bad-content-type" });
+        const body = await readJson(req);
+        if (!isPlainBody(body)) return send(res, 400, { ok: false, error: "bad-body" });
         const sessionId = typeof body.session === "string" ? body.session : "";
         if (sessionId === "") return send(res, 400, { ok: false, error: "missing-session" });
         store.remove(sessionId);
@@ -529,7 +694,22 @@ export function apply(ctx, rawConfig) {
 
   ctx.effect(() => ctx.tools.register(createTool({ store })), "vibe-phase-bar: tool");
 
-  const handlers = createHandlers({ store, clock, cooldownMs: config.precommitCooldownMs });
+  // 每次点击前向注册表要一次当前 agent：条目里存的可能已经过时，也可能根本没挂上
+  // （条是按钮开出来的）。注册表不在时退回 undefined，让调用方照常走 409。
+  const lookupAgent = (sessionId) => {
+    const registry = ctx.agents;
+    if (registry === undefined || registry === null || typeof registry.get !== "function") {
+      return undefined;
+    }
+    return registry.get(sessionId);
+  };
+
+  const handlers = createHandlers({
+    store,
+    clock,
+    cooldownMs: config.precommitCooldownMs,
+    lookupAgent,
+  });
   ctx.inject(["webServer"], (scope) => {
     scope.effect(
       () =>

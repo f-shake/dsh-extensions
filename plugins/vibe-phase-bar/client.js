@@ -15,30 +15,82 @@ window.__ModuleLoader__.load({
 
     /** 轮询间隔。宿主状态只由工具与点击改动，一秒一次足够。 */
     const POLL_MS = 1000;
-    /** 启动消息。用自然语言而不是 /vibe-coding，避免落到命令通道上不产生模型消息。 */
-    const START_TEXT = '用 vibe coding 开一个新流程，进入阶段一，等我说构想。';
+    /** 阶段四的验证方式。id 与宿主一致，顺序即弹框顺序。 */
+    const VERIFY_CHOICES = [
+      { id: 'unit', label: '全量单元测试', note: '整套单元测试跑一遍' },
+      { id: 'e2e', label: '端到端验证', note: '按真实路径把流程走通' },
+      { id: 'release', label: '发布测试', note: '打包与发布链路' },
+    ];
+    /** 阶段四弹框的默认勾选：单测 + 端到端。 */
+    const DEFAULT_VERIFY = ['unit', 'e2e'];
     const STYLE_ID = 'vibe-phase-bar';
 
     /**
-     * 每个会话一份状态源。图标与条共用它，所以用引用计数决定何时轮询。
+     * 点击瞬间的本地状态：只算条上要显示的那几个字段，其余仍以宿主返回为准。
+     * @param {object} state - 点击前的状态。
+     * @param {number} phase - 目标阶段。
+     * @param {object} [options] - 这次点击的选项。
+     * @returns {object} 乐观状态。
+     */
+    function optimistic(state, phase, options) {
+      const next = { ...state, phase, pending: null };
+      if (phase === 2 && options !== undefined && options.devSplit === true) {
+        next.devMode = 'split';
+        next.devStep = 'a';
+      } else if (phase === 2 && state.devMode === 'split' && state.devStep === 'a') {
+        next.devStep = 'b';
+      }
+      if (options !== undefined && Array.isArray(options.verify)) next.verify = options.verify;
+      return next;
+    }
+
+    /**
+     * 每个会话一份状态源。按钮与条共用它，所以用引用计数决定何时轮询。
      * @param {string} sessionId - 会话 id。
      * @returns {object} 订阅入口。
      */
     function createStore(sessionId) {
-      let snapshot = { loaded: false, state: null, error: false };
+      // hidden 与 lastVerify 只属于这一侧：隐藏是纯视觉开关，上次选的验证方式只用来
+      // 给弹框当默认值，都不写回宿主。
+      let snapshot = {
+        loaded: false,
+        state: null,
+        error: false,
+        hidden: false,
+        lastVerify: [...DEFAULT_VERIFY],
+        notice: null,
+      };
       const listeners = new Set();
       let timer = null;
       let refs = 0;
       let fetching = false;
+      // 每次本地写入都 +1。轮询出发时记下票号，回来时票号对不上就丢掉结果——
+      // 否则一次在飞的旧轮询会把刚点出来的状态覆盖回去（条闪一下就没了）。
+      let issued = 0;
+      let noticeTimer = null;
 
       const publish = (patch) => {
         snapshot = { ...snapshot, ...patch };
         for (const listener of [...listeners]) listener();
       };
 
+      /**
+       * 在条尾留一句话，四秒后自己消失。
+       * @param {string} text - 提示文案。
+       */
+      const showNotice = (text) => {
+        if (noticeTimer !== null) window.clearTimeout(noticeTimer);
+        publish({ notice: text });
+        noticeTimer = window.setTimeout(() => {
+          noticeTimer = null;
+          publish({ notice: null });
+        }, 4000);
+      };
+
       const load = async () => {
         if (fetching) return;
         fetching = true;
+        const ticket = ++issued;
         try {
           const response = await fetch(`/vibe-phase/state?session=${encodeURIComponent(sessionId)}`, {
             headers: { accept: 'application/json' },
@@ -47,6 +99,8 @@ window.__ModuleLoader__.load({
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const body = await response.json();
           const next = body?.state ?? null;
+          // 这中间发生过点击/开条/关闭，这次结果已经过期，丢掉。
+          if (ticket !== issued) return;
           // 只在内容真变了才换快照：否则每秒一次轮询都会触发整棵子树重渲染。
           // 「两边都是 null」也算没变——大多数会话根本没有流程，不该秒秒重渲染。
           // error 为真时必须放行一次：点击失败时本地那个乐观快照沿用了旧 version，
@@ -56,10 +110,20 @@ window.__ModuleLoader__.load({
             !snapshot.loaded ||
             (next === null) !== (snapshot.state === null) ||
             (next !== null && next.version !== snapshot.state.version);
-          if (changed) publish({ loaded: true, state: next, error: false });
+          // 流程在别处被关掉时（另一个标签页点 ×）把隐藏与上次选项一并复位，
+          // 否则按钮会停在「已隐藏」却再也点不出条来，下一轮还会沿用上一轮的选项。
+          if (changed) {
+            publish({
+              loaded: true,
+              state: next,
+              error: false,
+              hidden: next === null ? false : snapshot.hidden,
+              lastVerify: next === null ? [...DEFAULT_VERIFY] : snapshot.lastVerify,
+            });
+          }
         } catch {
           // 保留上一次状态，只把条标成「未同步」；首次就失败时保持 loaded=false，
-          // 这样启动图标不会在「不知道有没有流程」的时候冒出来。
+          // 这样按钮不会在「不知道有没有流程」的时候冒出来。
           publish({ error: true });
         } finally {
           fetching = false;
@@ -87,7 +151,12 @@ window.__ModuleLoader__.load({
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
         });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        if (!response.ok) {
+          // 把状态码带出去：选项非法（400）与会话已不在（409/502）该给用户的提示不同。
+          const error = new Error(`HTTP ${response.status}`);
+          error.status = response.status;
+          throw error;
+        }
         return response.json();
       };
 
@@ -103,23 +172,67 @@ window.__ModuleLoader__.load({
         /**
          * 点一个阶段：先本地乐观置位（点击即停止闪烁），再用宿主返回的状态对齐。
          * @param {number} phase - 目标阶段。
+         * @param {object} [options] - 弹框里选好的选项。
          */
-        async click(phase) {
+        async click(phase, options) {
           const current = snapshot.state;
           if (current === null) return;
-          publish({ state: { ...current, phase, pending: null }, error: false });
+          issued += 1;
+          publish({ state: optimistic(current, phase, options), error: false });
           try {
-            const body = await request('/vibe-phase/confirm', { session: sessionId, phase });
-            publish({ state: body?.state ?? null, error: false });
-          } catch {
+            const body = await request('/vibe-phase/confirm', { session: sessionId, phase, options });
+            publish({ state: body?.state ?? null, error: false, notice: null });
+          } catch (error) {
+            // 界面上只留一句话，具体原因留在控制台，排查时不用靠猜。
+            console.warn('[vibe-phase] 确认失败', error);
             publish({ error: true });
+            showNotice(error?.status === 400 ? '选项无效，请重新选择' : '确认失败，请再点一次');
             void load();
           }
         },
+        /** 没有流程时点按钮：只把阶段一状态建出来，不发消息。 */
+        async open() {
+          issued += 1;
+          try {
+            const body = await request('/vibe-phase/open', { session: sessionId });
+            publish({
+              loaded: true,
+              state: body?.state ?? null,
+              error: false,
+              hidden: false,
+              notice: null,
+            });
+          } catch (error) {
+            console.warn('[vibe-phase] 开条失败', error);
+            publish({ error: true });
+            showNotice('开不出阶段条，请刷新页面再试');
+          }
+        },
+        /**
+         * 收起或展开条。
+         * @param {boolean} value - 是否隐藏。
+         */
+        setHidden(value) {
+          publish({ hidden: value });
+        },
+        /**
+         * 记住这次选的验证方式，下次弹框拿它当默认值。
+         * @param {string[]} list - 已按弹框顺序排好的 id。
+         */
+        rememberVerify(list) {
+          publish({ lastVerify: [...list] });
+        },
         async reset() {
+          issued += 1;
           try {
             await request('/vibe-phase/reset', { session: sessionId });
-            publish({ state: null, error: false });
+            publish({
+              state: null,
+              error: false,
+              hidden: false,
+              notice: null,
+              lastVerify: [...DEFAULT_VERIFY],
+            });
           } catch {
             publish({ error: true });
           }
@@ -182,6 +295,17 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 把验证方式 id 列成中文。
+     * @param {string[]} ids - 验证方式 id。
+     * @returns {string} 顿号连接的显示名。
+     */
+    function verifySummary(ids) {
+      return ids
+        .map((id) => VERIFY_CHOICES.find((item) => item.id === id)?.label ?? id)
+        .join('、');
+    }
+
+    /**
      * 某个 chip 的悬停说明。
      * @param {number} phase - 阶段号。
      * @param {object} state - 当前状态。
@@ -190,6 +314,15 @@ window.__ModuleLoader__.load({
     function chipTitle(phase, state) {
       const name = PHASES[phase - 1].label;
       if (state.pending === phase) return `阶段 ${phase}（${name}）等待你确认`;
+      if (phase === 2 && state.devMode === 'split' && state.devStep === 'a') {
+        return '阶段 2a（开发·前端与设计），点击进入 2b';
+      }
+      if (phase === 2 && state.devMode === 'split' && state.devStep === 'b') {
+        return '阶段 2b（开发·完整实现）';
+      }
+      if (phase === 4 && Array.isArray(state.verify) && state.verify.length > 0) {
+        return `阶段 4（验证）· 已选 ${verifySummary(state.verify)}`;
+      }
       if (phase === 5 && state.phase === 5) {
         if (state.authorized) return '已授权提交';
         if (state.precommit) return '再次点击授权提交';
@@ -201,13 +334,16 @@ window.__ModuleLoader__.load({
     /**
      * 点击 chip。阶段合法性、冷却与幂等都由宿主判定——浏览器时钟和宿主时钟可能
      * 不一致（本仓库支持远端访问），在本地先拦一次会让远端用户「点了没反应」。
+     * 唯一在本地判断的是「2a 再点开发」：它不是重复点击，而是同阶段内的推进。
      * @param {object} store - 状态源。
      * @param {object} state - 当前状态。
      * @param {number} target - 目标阶段。
+     * @param {object} [options] - 弹框里选好的选项。
      */
-    function onChipClick(store, state, target) {
-      if (target === state.phase && (target !== 5 || state.authorized)) return;
-      void store.click(target);
+    function onChipClick(store, state, target, options) {
+      const advancingDev = target === 2 && state.devMode === 'split' && state.devStep === 'a';
+      if (target === state.phase && !advancingDev && (target !== 5 || state.authorized)) return;
+      void store.click(target, options);
     }
 
     /**
@@ -240,6 +376,7 @@ window.__ModuleLoader__.load({
 [data-vibe-phase] .vpb-chip[data-substate="authorized"]::after{content:"✓";margin-left:4px;opacity:.8}
 [data-vibe-phase] .vpb-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
 [data-vibe-phase] .vpb-error{flex:0 0 auto;opacity:.7}
+[data-vibe-phase] .vpb-notice{flex:0 0 auto;max-width:36%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.85}
 [data-vibe-phase] .vpb-close{flex:0 0 auto;border:0;background:transparent;color:inherit;font:inherit;font-size:14px;line-height:1;padding:2px 6px;border-radius:6px;cursor:pointer;opacity:.45}
 [data-vibe-phase] .vpb-close:hover{opacity:1;background:color-mix(in srgb,var(--dsw-alias-label-primary,#14181f) 8%,transparent)}
 [data-vibe-phase] .vpb-close[data-confirming]{opacity:1;font-size:12px;padding:3px 9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#14181f) 10%,transparent)}
@@ -248,55 +385,112 @@ window.__ModuleLoader__.load({
 [data-vibe-phase] .vpb-chip[data-state="pending"]{animation:none;font-weight:600}
 [data-vibe-phase] .vpb-chip[data-state="pending"]::before{content:"";display:inline-block;width:5px;height:5px;margin-right:5px;border-radius:50%;background:currentColor;vertical-align:middle}
 }
-[data-vibe-start]{display:inline-flex;align-items:center;justify-content:center;height:24px;min-width:24px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer;opacity:.7}
-[data-vibe-start]:hover{opacity:1;background:color-mix(in srgb,var(--dsw-alias-label-primary,#14181f) 8%,transparent)}
+/* 加号右侧的显隐按钮：不加任何底色，只靠字色区分开合——条在不在本身就是信号，
+   再给一块圆底反而像另一个按钮抢注意力。
+   尺寸仍是 28×28，与加号同高地占位，鼠标好点。 */
+[data-vibe-toggle]{position:relative;box-sizing:border-box;display:inline-grid;place-items:center;width:28px;height:28px;padding:0;border:0;background:transparent;color:var(--dsw-alias-label-tertiary,#adb2b8);font:inherit;font-size:10px;font-weight:600;letter-spacing:-.2px;line-height:1;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer;opacity:1}
+[data-vibe-toggle]:hover,[data-vibe-toggle][data-open]{color:var(--dsw-alias-label-primary,#f9fafb)}
+[data-vibe-toggle][data-waiting]::after{content:"";position:absolute;top:0;right:0;width:7px;height:7px;box-sizing:border-box;border-radius:50%;background:var(--dsw-alias-state-business-primary,#7aaaff);animation:vpb-blink 1.2s ease-in-out infinite}
+[data-vibe-phase] .vpb-step{align-self:flex-start;margin-left:2px;font-size:10px;line-height:1.2;opacity:.7}
+.vpb-layer{position:fixed;inset:0;z-index:60}
+.vpb-scrim{position:absolute;inset:0;background:transparent}
+.vpb-panel{position:absolute;box-sizing:border-box;width:min(92vw,320px);max-height:calc(100vh - 24px);overflow-y:auto;padding:10px;border-radius:10px;background:var(--dsw-specific-input-major,#2c2c2e);color:var(--dsw-alias-label-primary,#f9fafb);border:1px solid var(--dsw-alias-border-l2,#ffffff1f);box-shadow:0 8px 28px rgba(0,0,0,.28);display:flex;flex-direction:column;gap:4px}
+.vpb-panel-title{margin:0 0 2px;font-size:12px;font-weight:600}
+.vpb-opt{display:flex;gap:8px;align-items:flex-start;width:100%;border:0;background:transparent;color:inherit;font:inherit;text-align:left;padding:7px 8px;border-radius:8px;cursor:pointer}
+.vpb-opt:hover{background:var(--dsw-alias-interactive-bg-hover,#ffffff14)}
+.vpb-opt[data-checked]{background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#7aaaff) 14%,transparent)}
+.vpb-opt-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.vpb-opt-label{font-size:12px;line-height:1.35}
+.vpb-opt-note{font-size:11px;line-height:1.35;opacity:.62}
+.vpb-check{flex:0 0 auto;width:14px;height:14px;margin-top:1px;box-sizing:border-box;border-radius:4px;border:1px solid color-mix(in srgb,var(--dsw-alias-label-primary,#14181f) 38%,transparent);position:relative}
+.vpb-check[data-round]{border-radius:50%}
+.vpb-check[data-on]{background:var(--dsw-alias-state-business-primary,#7aaaff);border-color:transparent}
+.vpb-check[data-on]:not([data-round])::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
+.vpb-check[data-on][data-round]::after{content:"";position:absolute;left:3px;top:3px;width:6px;height:6px;border-radius:50%;background:#fff}
+.vpb-actions{display:flex;justify-content:flex-end;gap:6px;margin-top:4px}
+/* 默认的蓝色聚焦环套在这块浅蓝底色上太重，换成同尺寸的中性描边，键盘用户照样看得见。 */
+.vpb-opt:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-label-primary,#f9fafb) 38%,transparent);outline-offset:-2px}
+.vpb-btn:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-label-primary,#f9fafb) 38%,transparent);outline-offset:1px}
+.vpb-btn{border:0;background:transparent;color:inherit;font:inherit;font-size:12px;padding:5px 10px;border-radius:7px;cursor:pointer;opacity:.78}
+.vpb-btn:hover{background:var(--dsw-alias-interactive-bg-hover,#ffffff14)}
+.vpb-btn[data-primary]{background:var(--dsw-alias-state-business-primary,#7aaaff);color:#fff;opacity:1}
+.vpb-btn[data-primary]:hover{background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#7aaaff) 88%,#000)}
+.vpb-btn:disabled{opacity:.4;cursor:not-allowed}
+.vpb-hint{margin:0;font-size:11px;line-height:1.35;opacity:.6}
 `;
       document.head.appendChild(tag);
       return () => tag.remove();
     }
 
     /**
-     * 左下角的启动图标：只在没有流程状态时出现。
+     * 加号右侧的按钮：只做显示或隐藏，一条消息都不发。
+     *
+     * 没有流程时点它是「开始」——把阶段一状态建出来；有流程时点它是收起/展开条。
+     * 收起之后若还有阶段在等人确认，用一个圆点提醒，但不自动展开：那样「隐藏」
+     * 就成了半残的隐藏，也违反「条只由按钮和技能两种方式决定」。
      * @param {object} props - 插槽标准属性。
      * @returns {object | null} 按钮。
      */
-    function StartButton({ sessionId, inputActions, useInput }) {
-      const { snapshot } = usePhaseStore(sessionId);
-      const readInput = typeof useInput === 'function' ? useInput : () => '';
-      const draft = readInput((value) => value?.draft ?? '');
+    function BarToggle({ sessionId }) {
+      const { store, snapshot } = usePhaseStore(sessionId);
+      // 首次拉取还没回来先不画：否则有流程的会话会闪一下「开始」再变成「收起」。
+      if (!snapshot.loaded) return null;
 
-      if (!snapshot.loaded || snapshot.state !== null) return null;
+      const state = snapshot.state;
+      const open = state !== null && !snapshot.hidden;
+      const waiting = state !== null && snapshot.hidden && state.pending !== null;
+      const label =
+        state === null
+          ? '开始 vibe coding 流程'
+          : waiting
+            ? '显示阶段条（有阶段在等你确认）'
+            : open
+              ? '隐藏阶段条'
+              : '显示阶段条';
 
-      const start = () => {
-        if (inputActions === undefined) return;
-        const saved = draft;
-        inputActions.setDraft(START_TEXT);
-        inputActions.submit();
-        // 启动消息借道正常提交，草稿会被一起带走；用户原来写的字在提交后放回去。
-        if (saved !== '') window.setTimeout(() => inputActions.setDraft(saved), 60);
+      const toggle = () => {
+        if (state === null) {
+          void store.open();
+          return;
+        }
+        store.setHidden(!snapshot.hidden);
       };
 
       return h(
         'button',
         {
           type: 'button',
-          'data-vibe-start': '',
-          title: '用 vibe coding 开始一个流程',
-          'aria-label': '用 vibe coding 开始一个流程',
-          onClick: start,
+          'data-vibe-toggle': '',
+          'data-open': open ? '' : undefined,
+          'data-waiting': waiting ? '' : undefined,
+          'aria-expanded': open,
+          title: label,
+          'aria-label': label,
+          onClick: toggle,
         },
         h('span', { 'aria-hidden': 'true' }, '</>'),
       );
     }
 
     /**
-     * 输入框上方的五阶段条。
+     * 输入框上方的五阶段条，以及点「开发」「验证」时弹出的选项面板。
      * @param {object} props - 插槽标准属性。
      * @returns {object | null} 阶段条。
      */
     function PhaseBar({ sessionId }) {
       const { store, snapshot } = usePhaseStore(sessionId);
       const [confirming, setConfirming] = React.useState(false);
+      // 面板是纯本地状态：开着不代表宿主变了，取消就等于什么都没发生。
+      const [dialog, setDialog] = React.useState(null);
+      const [devSplit, setDevSplit] = React.useState(false);
+      const [verifyChoice, setVerifyChoice] = React.useState(() => [...snapshot.lastVerify]);
+      const [anchor, setAnchor] = React.useState(null);
+      const barRef = React.useRef(null);
+      const panelRef = React.useRef(null);
+      // 关掉面板之后焦点要回到刚点的那个 chip，否则焦点会掉到 body 上。
+      const chipRef = React.useRef(null);
+      const focusedRef = React.useRef(false);
+
       React.useEffect(() => {
         if (!confirming) return undefined;
         // 二次确认只等一次点击；四秒没动就收回，免得下一眼还停在「关闭？」上。
@@ -304,8 +498,63 @@ window.__ModuleLoader__.load({
         return () => window.clearTimeout(timer);
       }, [confirming]);
 
+      const closeDialog = () => {
+        setDialog(null);
+        const chip = chipRef.current;
+        if (chip !== null) chip.focus({ preventScroll: true });
+      };
+
+      // 面板贴着条的上沿：位置取自条的实际矩形，窗口缩放或条换行都不会跑偏。
+      React.useLayoutEffect(() => {
+        if (dialog === null) return undefined;
+        const measure = () => {
+          const bar = barRef.current;
+          if (bar === null) return;
+          const rect = bar.getBoundingClientRect();
+          const panel = panelRef.current;
+          const height = panel === null ? 0 : panel.offsetHeight;
+          const bottom = window.innerHeight - rect.top + 8;
+          // 条上方的空间比面板还矮时（横屏手机、很矮的窗口）往上顶，别让标题跑到视口外。
+          const maxBottom = Math.max(8, window.innerHeight - height - 8);
+          setAnchor({ left: rect.left, bottom: Math.min(bottom, maxBottom) });
+        };
+        measure();
+        window.addEventListener('resize', measure);
+        return () => window.removeEventListener('resize', measure);
+      }, [dialog]);
+
+      React.useEffect(() => {
+        if (dialog === null) return undefined;
+        const onKey = (event) => {
+          if (event.key !== 'Escape') return;
+          event.stopPropagation();
+          closeDialog();
+        };
+        document.addEventListener('keydown', onKey, true);
+        return () => document.removeEventListener('keydown', onKey, true);
+      }, [dialog]);
+
+      // 面板首次可见时把焦点送进去。锚点没算出来之前面板是 visibility:hidden，
+      // 那时 focus() 不会生效，所以要等 anchor 落地——但只送一次，别在缩放时抢焦点。
+      React.useLayoutEffect(() => {
+        if (dialog === null) {
+          focusedRef.current = false;
+          return;
+        }
+        if (anchor === null || focusedRef.current) return;
+        focusedRef.current = true;
+        const panel = panelRef.current;
+        const first = panel === null ? null : panel.querySelector('[data-vpb-option]');
+        if (first !== null) first.focus({ preventScroll: true });
+      }, [dialog, anchor]);
+
+      // 条被收起时把面板一并关掉——否则再展开时上一次的选项面板会自己回来。
+      React.useEffect(() => {
+        if (snapshot.hidden && dialog !== null) setDialog(null);
+      }, [snapshot.hidden, dialog]);
+
       const state = snapshot.state;
-      if (!snapshot.loaded || state === null) return null;
+      if (!snapshot.loaded || state === null || snapshot.hidden) return null;
 
       const close = () => {
         if (!confirming) {
@@ -316,34 +565,165 @@ window.__ModuleLoader__.load({
         void store.reset();
       };
 
-      const chips = PHASES.map((item) =>
-        h(
+      const toggleVerify = (id) => {
+        setVerifyChoice((current) =>
+          VERIFY_CHOICES.filter((item) =>
+            item.id === id ? !current.includes(id) : current.includes(item.id),
+          ).map((item) => item.id),
+        );
+      };
+
+      const submitDev = () => {
+        closeDialog();
+        onChipClick(store, state, 2, { devSplit });
+      };
+
+      const submitVerify = () => {
+        if (verifyChoice.length === 0) return;
+        store.rememberVerify(verifyChoice);
+        closeDialog();
+        onChipClick(store, state, 4, { verify: verifyChoice });
+      };
+
+      const onChip = (event, item) => {
+        chipRef.current = event.currentTarget;
+        if (dialog !== null) return;
+        // 只有「答案不止一个」的两处拦下来问，其余点击照旧直接确认。
+        if (item.n === 2 && state.phase < 2) {
+          setDevSplit(false);
+          setDialog('dev');
+          return;
+        }
+        if (item.n === 4 && state.phase < 4) {
+          setVerifyChoice(
+            snapshot.lastVerify.length > 0 ? [...snapshot.lastVerify] : [...DEFAULT_VERIFY],
+          );
+          setDialog('verify');
+          return;
+        }
+        onChipClick(store, state, item.n);
+      };
+
+      const chips = PHASES.map((item) => {
+        const step = item.n === 2 && state.devMode === 'split' ? state.devStep : null;
+        return h(
           'button',
           {
             key: item.n,
             type: 'button',
-            role: 'tab',
             className: 'vpb-chip',
             'data-state': chipState(item.n, state),
             'data-substate': item.n === 5 ? commitSubstate(state) : undefined,
+            // 这几格是「点了就确认这一阶段」的动作按钮，不是 tab 页签：
+            // 用 aria-current 标当前阶段即可，套 tab 语义反而要求方向键与 tabpanel。
             'aria-current': item.n === state.phase ? 'step' : undefined,
-            // 等待语义只放在 title（描述）里；名称保持「N 短名」，免得聚焦时被连读两句近义内容。
-            'aria-label': `${item.n} ${item.label}`,
+            'aria-label':
+              step === null ? `${item.n} ${item.label}` : `${item.n} ${item.label} 2${step}`,
             title: chipTitle(item.n, state),
-            onClick: () => onChipClick(store, state, item.n),
+            onClick: (event) => onChip(event, item),
           },
           item.label,
-        ),
-      );
+          step === null ? null : h('span', { className: 'vpb-step', 'aria-hidden': 'true' }, `2${step}`),
+        );
+      });
+
+      const dialogTitle = dialog === 'dev' ? '阶段 2 怎么开发' : '阶段 4 跑哪些验证';
+      const devOptions = [
+        { split: false, label: '一次性完成', note: '按确认后的计划一口气做完，中间不停' },
+        { split: true, label: '分两步', note: '先 2a 只做界面与演示数据，看完设计再进 2b 完整实现' },
+      ];
+
+      const option = (key, checked, onClick, label, note, round) =>
+        h(
+          'button',
+          {
+            key,
+            type: 'button',
+            className: 'vpb-opt',
+            'data-vpb-option': '',
+            'data-checked': checked ? '' : undefined,
+            role: round ? 'radio' : 'checkbox',
+            'aria-checked': checked,
+            onClick,
+          },
+          h('span', {
+            className: 'vpb-check',
+            'data-round': round ? '' : undefined,
+            'data-on': checked ? '' : undefined,
+          }),
+          h(
+            'span',
+            { className: 'vpb-opt-body' },
+            h('span', { className: 'vpb-opt-label' }, label),
+            note === '' ? null : h('span', { className: 'vpb-opt-note' }, note),
+          ),
+        );
+
+      const panel =
+        dialog === 'dev'
+          ? [
+              h('p', { key: 'title', className: 'vpb-panel-title' }, dialogTitle),
+              ...devOptions.map((item) =>
+                option(
+                  String(item.split),
+                  devSplit === item.split,
+                  () => setDevSplit(item.split),
+                  item.label,
+                  item.note,
+                  true,
+                ),
+              ),
+              h(
+                'div',
+                { key: 'actions', className: 'vpb-actions' },
+                h('button', { type: 'button', className: 'vpb-btn', onClick: closeDialog }, '取消'),
+                h(
+                  'button',
+                  { type: 'button', className: 'vpb-btn', 'data-primary': '', onClick: submitDev },
+                  '进入',
+                ),
+              ),
+            ]
+          : [
+              h('p', { key: 'title', className: 'vpb-panel-title' }, dialogTitle),
+              ...VERIFY_CHOICES.map((item) =>
+                option(
+                  item.id,
+                  verifyChoice.includes(item.id),
+                  () => toggleVerify(item.id),
+                  item.label,
+                  item.note,
+                  false,
+                ),
+              ),
+              h('p', { key: 'hint', className: 'vpb-hint' }, verifyChoice.length === 0 ? '至少选一种验证方式' : ''),
+              h(
+                'div',
+                { key: 'actions', className: 'vpb-actions' },
+                h('button', { type: 'button', className: 'vpb-btn', onClick: closeDialog }, '取消'),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'vpb-btn',
+                    'data-primary': '',
+                    disabled: verifyChoice.length === 0,
+                    onClick: submitVerify,
+                  },
+                  '进入',
+                ),
+              ),
+            ];
 
       return h(
         'div',
         {
+          ref: barRef,
           'data-vibe-phase': '',
           role: 'group',
           'aria-label': 'vibe coding 阶段',
         },
-        h('div', { className: 'vpb-track', role: 'tablist' }, chips),
+        h('div', { className: 'vpb-track' }, chips),
         // 容器常驻、只换文字：live region 必须先在 DOM 里，后填入内容才会被播报。
         h(
           'span',
@@ -353,6 +733,9 @@ window.__ModuleLoader__.load({
             : '',
         ),
         snapshot.error ? h('span', { className: 'vpb-error', role: 'status' }, '状态未同步') : null,
+        snapshot.notice === null
+          ? null
+          : h('span', { className: 'vpb-notice', role: 'status' }, snapshot.notice),
         h(
           'button',
           {
@@ -365,6 +748,30 @@ window.__ModuleLoader__.load({
           },
           confirming ? '关闭？' : '×',
         ),
+        dialog === null
+          ? null
+          : h(
+              'div',
+              { className: 'vpb-layer' },
+              h('div', { className: 'vpb-scrim', onClick: closeDialog }),
+              h(
+                'div',
+                {
+                  ref: panelRef,
+                  className: 'vpb-panel',
+                  role: 'dialog',
+                  'aria-label': dialogTitle,
+                  style:
+                    anchor === null
+                      ? { visibility: 'hidden' }
+                      : {
+                          left: `${Math.max(8, Math.min(anchor.left, window.innerWidth - 328))}px`,
+                          bottom: `${anchor.bottom}px`,
+                        },
+                },
+                panel,
+              ),
+            ),
       );
     }
 
@@ -374,8 +781,8 @@ window.__ModuleLoader__.load({
         ctx.effect(() => ensureStyle(), 'vibe-phase-bar: styles');
         ctx.slots.inject('conversation.input.left', () =>
           ctx.slots.register(
-            { name: 'conversation.input.left', id: 'vibe-phase-start', order: 60 },
-            StartButton,
+            { name: 'conversation.input.left', id: 'vibe-phase-toggle', order: 60 },
+            BarToggle,
           ),
         );
         ctx.slots.inject('conversation.input.dock', () =>

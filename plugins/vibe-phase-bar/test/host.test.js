@@ -76,6 +76,8 @@ function postReq(url, payload) {
   return {
     method: "POST",
     url,
+    // 路由只收 JSON：跨站表单发不出这个头，等于一道简易 CSRF 闸。
+    headers: { "content-type": "application/json" },
     async *[Symbol.asyncIterator]() {
       yield Buffer.from(text);
     },
@@ -363,5 +365,178 @@ test("sessionIdOf 兼容几种挂法", () => {
   assert.equal(sessionIdOf({ session: { id: "b" } }), "b");
   assert.equal(sessionIdOf({ id: "c" }), "c");
   assert.equal(sessionIdOf(undefined), undefined);
+});
+
+test("open 在没有流程时建出阶段一，且不发任何消息", async () => {
+  const store = createStore();
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  const { agent, followups } = makeAgent("s1");
+
+  const res = await call(handler, postReq("/vibe-phase/open", { session: "s1" }));
+  assert.equal(res.status, 200);
+  assert.equal(res.body.state.phase, 1);
+  assert.equal(followups.length, 0);
+
+  store.ensure("s1", agent);
+  assert.equal(store.get("s1").state.phase, 1);
+});
+
+test("open 对已有状态幂等，不会把阶段重置回一", async () => {
+  const store = createStore();
+  const tool = createTool({ store });
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  const { agent } = makeAgent("s1");
+
+  await tool.execute({ action: "enter", phase: 3 }, { agent });
+  const res = await call(handler, postReq("/vibe-phase/open", { session: "s1" }));
+  assert.equal(res.body.state.phase, 3);
+});
+
+test("open 缺会话 id 返回 400", async () => {
+  const store = createStore();
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  const res = await call(handler, postReq("/vibe-phase/open", {}));
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "missing-session");
+});
+
+test("没有可用 agent 时点阶段返回 409，状态不动", async () => {
+  const store = createStore();
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  await call(handler, postReq("/vibe-phase/open", { session: "s1" }));
+
+  const res = await call(handler, postReq("/vibe-phase/confirm", { session: "s1", phase: 2 }));
+  assert.equal(res.status, 409);
+  assert.equal(store.get("s1").state.phase, 1);
+});
+
+test("open 顺手挂上会话当前的 agent，开出来的条能直接点", async () => {
+  const store = createStore();
+  const { agent, followups } = makeAgent("s1");
+  const handler = createHandlers({ store, clock: () => START, lookupAgent: (id) => (id === "s1" ? agent : undefined) }).handle;
+
+  const opened = await call(handler, postReq("/vibe-phase/open", { session: "s1" }));
+  assert.equal(opened.body.state.phase, 1);
+  assert.equal(followups.length, 0);
+
+  const res = await call(handler, postReq("/vibe-phase/confirm", { session: "s1", phase: 2 }));
+  assert.equal(res.status, 200);
+  assert.equal(followups.length, 1);
+});
+
+test("条目里的 agent 丢了也能从注册表补回来", async () => {
+  const store = createStore();
+  const tool = createTool({ store });
+  const { agent, followups } = makeAgent("s1");
+  await tool.execute({ action: "enter", phase: 1 }, { agent });
+
+  const handler = createHandlers({ store, clock: () => START, lookupAgent: () => agent }).handle;
+  store.get("s1").agent = undefined;
+
+  const res = await call(handler, postReq("/vibe-phase/confirm", { session: "s1", phase: 2 }));
+  assert.equal(res.status, 200);
+  assert.equal(followups.length, 1);
+  assert.equal(store.get("s1").agent, agent);
+});
+
+test("非 JSON 的 POST 一律 400，连体都不读", async () => {
+  const store = createStore();
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  const form = {
+    method: "POST",
+    url: "/vibe-phase/confirm",
+    headers: { "content-type": "text/plain" },
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(JSON.stringify({ session: "s1", phase: 2 }));
+    },
+  };
+  const res = await call(handler, form);
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "bad-content-type");
+});
+
+test("缺 session 与数组体的错误码三个路由一致", async () => {
+  const store = createStore();
+  const handler = createHandlers({ store, clock: () => START }).handle;
+
+  const missing = await call(handler, postReq("/vibe-phase/confirm", { phase: 2 }));
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.error, "missing-session");
+
+  const array = {
+    method: "POST",
+    url: "/vibe-phase/open",
+    headers: { "content-type": "application/json" },
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from("[1,2,3]");
+    },
+  };
+  const bad = await call(handler, array);
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error, "bad-body");
+});
+
+test("确认时带上分两步的选项，消息与状态都按 2a 走", async () => {
+  const store = createStore();
+  const tool = createTool({ store });
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  const { agent, followups } = makeAgent("s1");
+  await tool.execute({ action: "enter", phase: 1 }, { agent });
+
+  const res = await call(
+    handler,
+    postReq("/vibe-phase/confirm", { session: "s1", phase: 2, options: { devSplit: true } }),
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.body.state.phase, 2);
+  assert.equal(res.body.state.devMode, "split");
+  assert.equal(res.body.state.devStep, "a");
+  assert.match(followups[0].content[0].text, /确认进入阶段 2a/);
+});
+
+test("2a 之后再确认阶段二：进 2b，且不需要选项", async () => {
+  const store = createStore();
+  const tool = createTool({ store });
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  const { agent, followups } = makeAgent("s1");
+  await tool.execute({ action: "enter", phase: 1 }, { agent });
+  await call(handler, postReq("/vibe-phase/confirm", { session: "s1", phase: 2, options: { devSplit: true } }));
+
+  const res = await call(handler, postReq("/vibe-phase/confirm", { session: "s1", phase: 2 }));
+  assert.equal(res.body.state.devStep, "b");
+  assert.equal(followups.length, 2);
+  assert.match(followups[1].content[0].text, /确认进入阶段 2b/);
+});
+
+test("确认时带上验证方式，消息列出方式且状态记住它", async () => {
+  const store = createStore();
+  const tool = createTool({ store });
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  const { agent, followups } = makeAgent("s1");
+  await tool.execute({ action: "enter", phase: 3 }, { agent });
+
+  const res = await call(
+    handler,
+    postReq("/vibe-phase/confirm", { session: "s1", phase: 4, options: { verify: ["e2e", "unit"] } }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.state.verify, ["unit", "e2e"]);
+  assert.match(followups[0].content[0].text, /验证方式：全量单元测试、端到端验证/);
+});
+
+test("非法的选项组合返回 400，不推进状态也不发消息", async () => {
+  const store = createStore();
+  const tool = createTool({ store });
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  const { agent, followups } = makeAgent("s1");
+  await tool.execute({ action: "enter", phase: 3 }, { agent });
+
+  for (const options of [{ verify: [] }, { verify: ["nope"] }, { devSplit: "yes" }, []]) {
+    const res = await call(handler, postReq("/vibe-phase/confirm", { session: "s1", phase: 4, options }));
+    assert.equal(res.status, 400, JSON.stringify(options));
+    assert.equal(res.body.error, "invalid-options");
+  }
+  assert.equal(followups.length, 0);
+  assert.equal(store.get("s1").state.phase, 3);
 });
 

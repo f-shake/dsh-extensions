@@ -5,9 +5,11 @@ import {
   applyRequest,
   createState,
   isValidPhase,
+  normalizeOptions,
   planConfirm,
   phaseName,
   publicState,
+  verifyLabels,
 } from "../index.js";
 
 const START = 1_000_000;
@@ -157,10 +159,13 @@ test("publicState 不泄露内部字段", () => {
   const view = publicState(state);
   assert.deepEqual(Object.keys(view).sort(), [
     "authorized",
+    "devMode",
+    "devStep",
     "pending",
     "phase",
     "precommit",
     "skipped",
+    "verify",
     "version",
   ]);
   assert.equal(view.precommitAt, undefined);
@@ -174,4 +179,142 @@ test("version 每次真实变更都前进", () => {
   assert.equal(entered.version, start.version + 1);
   assert.equal(requested.version, entered.version + 1);
   assert.equal(applyRequest(entered, 2, START), entered);
+});
+
+test("新建状态默认一次性完成、没有验证方式", () => {
+  const state = createState(START);
+  assert.equal(state.devMode, "single");
+  assert.equal(state.devStep, null);
+  assert.deepEqual(state.verify, []);
+});
+
+test("点开发选一次性完成：状态与消息都按单步走", () => {
+  const state = applyEnter(createState(START), 1, START);
+  const result = planConfirm(state, 2, START + 10, 2000, { devSplit: false });
+  assert.equal(result.state.phase, 2);
+  assert.equal(result.state.devMode, "single");
+  assert.equal(result.state.devStep, null);
+  assert.equal(result.message, "确认进入阶段 2（开发）。");
+});
+
+test("点开发选分两步：先进 2a，消息说明只做界面与演示数据", () => {
+  const state = applyEnter(createState(START), 1, START);
+  const result = planConfirm(state, 2, START + 10, 2000, { devSplit: true });
+  assert.equal(result.state.phase, 2);
+  assert.equal(result.state.devMode, "split");
+  assert.equal(result.state.devStep, "a");
+  assert.match(result.message, /确认进入阶段 2a/);
+  assert.match(result.message, /演示数据/);
+  assert.match(result.message, /留到 2b/);
+});
+
+test("停在 2a 再点开发：直接进 2b，不再要求选项", () => {
+  let state = applyEnter(createState(START), 1, START);
+  state = planConfirm(state, 2, START + 10, 2000, { devSplit: true }).state;
+  const result = planConfirm(state, 2, START + 20);
+  assert.equal(result.state.phase, 2);
+  assert.equal(result.state.devStep, "b");
+  assert.match(result.message, /确认进入阶段 2b/);
+});
+
+test("已在 2b 再点开发等于没点", () => {
+  let state = applyEnter(createState(START), 1, START);
+  state = planConfirm(state, 2, START + 10, 2000, { devSplit: true }).state;
+  state = planConfirm(state, 2, START + 20).state;
+  const result = planConfirm(state, 2, START + 30);
+  assert.equal(result.reason, "same-phase");
+  assert.equal(result.state, state);
+});
+
+test("从 2a 直接走复核：只提一句 2b 未做，阶段二不算跳过", () => {
+  let state = applyEnter(createState(START), 1, START);
+  state = planConfirm(state, 2, START + 10, 2000, { devSplit: true }).state;
+  const result = planConfirm(state, 3, START + 20);
+  assert.equal(result.state.phase, 3);
+  assert.deepEqual(result.state.skipped, []);
+  assert.equal(result.message, "确认进入阶段 3（复核）。阶段 2b 未做。");
+  assert.equal(result.state.devMode, "single");
+  assert.equal(result.state.devStep, null);
+});
+
+test("点验证选两种方式：状态记住选项，消息带上方式", () => {
+  const state = applyEnter(createState(START), 3, START);
+  const result = planConfirm(state, 4, START + 10, 2000, { verify: ["unit", "e2e"] });
+  assert.equal(result.state.phase, 4);
+  assert.deepEqual(result.state.verify, ["unit", "e2e"]);
+  assert.equal(
+    result.message,
+    "确认进入阶段 4（验证），验证方式：全量单元测试、端到端验证。按选定方式执行，不要再问我选哪种。",
+  );
+});
+
+test("跳到阶段四时，跳过项与验证方式写在同一句里", () => {
+  const state = applyEnter(createState(START), 2, START);
+  const result = planConfirm(state, 4, START + 10, 2000, { verify: ["release"] });
+  assert.deepEqual(result.state.skipped, [3]);
+  assert.equal(
+    result.message,
+    "确认跳到阶段 4（验证），跳过阶段 3，验证方式：发布测试。按选定方式执行，不要再问我选哪种。",
+  );
+});
+
+test("不带验证方式进阶段四：消息照旧，verify 保持原样", () => {
+  const state = applyEnter(createState(START), 3, START);
+  const result = planConfirm(state, 4, START + 10);
+  assert.equal(result.message, "确认进入阶段 4（验证）。");
+  assert.deepEqual(result.state.verify, []);
+});
+
+test("进入阶段五清空验证方式", () => {
+  let state = applyEnter(createState(START), 3, START);
+  state = planConfirm(state, 4, START + 10, 2000, { verify: ["unit"] }).state;
+  const result = planConfirm(state, 5, START + 20);
+  assert.deepEqual(result.state.verify, []);
+  assert.equal(result.state.precommit, true);
+});
+
+test("回退到阶段二把走法复位为一次性、并清掉验证方式", () => {
+  let state = applyEnter(createState(START), 3, START);
+  state = planConfirm(state, 4, START + 10, 2000, { verify: ["unit", "e2e"] }).state;
+  const back = planConfirm(state, 2, START + 20);
+  assert.equal(back.state.phase, 2);
+  assert.equal(back.state.devMode, "single");
+  assert.equal(back.state.devStep, null);
+  assert.deepEqual(back.state.verify, []);
+});
+
+test("工具 enter 一律按一次性完成记，弹框选过的走法不保留", () => {
+  let state = applyEnter(createState(START), 1, START);
+  state = planConfirm(state, 2, START + 10, 2000, { devSplit: true }).state;
+  assert.equal(state.devStep, "a");
+  const entered = applyEnter(state, 2, START + 20);
+  assert.equal(entered.devMode, "single");
+  assert.equal(entered.devStep, null);
+});
+
+test("normalizeOptions 接受合法组合并按固定顺序排", () => {
+  assert.deepEqual(normalizeOptions(undefined), { ok: true, options: {} });
+  assert.deepEqual(normalizeOptions({ devSplit: true }), { ok: true, options: { devSplit: true } });
+  assert.deepEqual(normalizeOptions({ verify: ["e2e", "unit", "e2e"] }), {
+    ok: true,
+    options: { verify: ["unit", "e2e"] },
+  });
+});
+
+test("normalizeOptions 拒绝非法组合", () => {
+  for (const raw of [
+    [],
+    { devSplit: "yes" },
+    { verify: "unit" },
+    { verify: [] },
+    { verify: ["unit", "unknown"] },
+    { verify: [1] },
+  ]) {
+    assert.equal(normalizeOptions(raw).ok, false, JSON.stringify(raw));
+  }
+});
+
+test("verifyLabels 把 id 翻成中文，未知 id 原样保留", () => {
+  assert.equal(verifyLabels(["unit", "release"]), "全量单元测试、发布测试");
+  assert.equal(verifyLabels(["nope"]), "nope");
 });

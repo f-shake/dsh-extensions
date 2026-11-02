@@ -8,12 +8,13 @@ dsh-extensions/
 ├── dsh-auth/                  DSH 公网访问网关：密码 + TOTP 双因子（Python / FastAPI）
 └── plugins/                   DSH 客户端插件（Cordis bundle）
     ├── mobile-fit/            窄屏适配：弹窗/设置面板不超屏
+    ├── header-compact/        窄屏标题行收紧：子智能体/后台任务文案缩短、隐藏手机端无用的「在本地打开」
     ├── session-activity-order/ 侧栏排序：活跃工作区/会话自动置顶
     ├── composer-focus/        输入框交互：点按钮不拉键盘、滑聊天区收键盘、切会话不自动弹键盘
     ├── background-send/       插话即转后台：用户插话时把前台命令转到后台
     ├── payload-diet/          宿主侧减负：外置 combo 里的内联图、给静态资源补缓存头、收窄会话首屏窗口
     ├── mux-deflate/           宿主侧减负：给 /api/remote.mux 的 WebSocket 打开压缩
-    ├── vibe-phase-bar/        vibe coding 流程：输入框上方的五阶段条、左下角启动图标、阶段请求工具
+    ├── vibe-phase-bar/        vibe coding 流程：输入框上方的五阶段条、加号右侧的显隐按钮、阶段二/四的选择弹框、阶段请求工具
     └── session-list-cache/    客户端减负：会话列表先用上次的结果出来，不等网络
 ```
 

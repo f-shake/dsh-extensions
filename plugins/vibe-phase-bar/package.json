@@ -1,9 +1,9 @@
 {
   "name": "@local/vibe-phase-bar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "vibe coding 五阶段面包屑：输入框上方的阶段条、左下角的启动图标，以及一个给模型用的阶段请求工具",
+  "description": "vibe coding 五阶段面包屑：输入框上方的阶段条、加号右侧的显隐按钮、阶段二与阶段四的选择弹框，以及一个给模型用的阶段请求工具",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"
