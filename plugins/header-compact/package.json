@@ -1,0 +1,30 @@
+{
+  "name": "@local/header-compact",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "窄屏会话标题行收紧：子智能体与后台任务的计数文案换短写法，并隐藏手机端用不上的在本地打开按钮",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "license": "MIT"
+}

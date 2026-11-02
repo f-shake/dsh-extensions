@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pending</title>
+    <style>
+      /*
+       * 会话标题行的关键布局，按宿主实际结构简化：标题吃掉剩余宽度，
+       * 右侧的动作区与工具区都是固定宽度。被测的是插件自己的 CSS 与 DOM 改写，
+       * 这里只要保证 :has() 的作用域与媒体查询在真实布局里成立。
+       */
+      body {
+        margin: 0;
+        font: 14px/1.4 system-ui, sans-serif;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        background: none;
+        border: 0;
+      }
+      .titleRow {
+        display: flex;
+        align-items: center;
+        min-height: 30px;
+        padding: 0 28px 0 20px;
+      }
+      .titleCluster {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .crumb {
+        max-width: 220px;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .headerActions,
+      .headerUtilities {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .headerUtilities {
+        margin-left: 20px;
+      }
+      .menuAnchor {
+        flex: none;
+        display: inline-flex;
+      }
+      .split {
+        box-sizing: border-box;
+        display: inline-flex;
+        align-items: stretch;
+        height: 24px;
+        border: 0.5px solid #888;
+        border-radius: 4px;
+      }
+      .split button {
+        font-size: 11px;
+        padding: 2px 5px;
+      }
+      .count {
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="titleRow" id="row">
+      <div class="titleCluster">
+        <span class="crumb">手机端标题行验证会话</span>
+        <div class="headerActions">
+          <button
+            type="button"
+            id="subagent"
+            aria-haspopup="tree"
+            aria-expanded="false"
+            aria-label="3 个子智能体，正在运行"
+          >
+            <span class="activitySlot"><svg width="8" height="8"></svg></span><span class="count">3 个子智能体</span
+            ><svg width="12" height="12"><path d="M0 0" /></svg>
+          </button>
+          <button type="button" id="jobs" aria-expanded="false" aria-label="1 个后台任务运行中">
+            <span class="activitySlot"><svg width="8" height="8"></svg></span
+            ><span class="count">1 个后台任务运行中</span><svg width="12" height="12"><path d="M0 0" /></svg>
+          </button>
+        </div>
+      </div>
+      <div class="headerUtilities">
+        <button type="button" id="more" aria-label="更多操作">…</button>
+        <div class="menuAnchor" id="openAnchor">
+          <div class="split" data-open-target="directory" data-size="compact">
+            <button type="button" id="openMain" aria-label="在 VS Code 中打开"><svg width="13" height="13"></svg></button>
+            <button type="button" id="openChevron" aria-label="更多打开方式">v</button>
+          </div>
+        </div>
+      </div>
+      <div data-conversation-header-corner="" id="corner"><button type="button" aria-label="右栏">▭</button></div>
+    </div>
+
+    <script>
+      window.__ModuleLoader__ = {
+        load(module) {
+          window.__module = module;
+        },
+      };
+    </script>
+    <script>
+      /*__CLIENT_SOURCE__*/
+    </script>
+    <script>
+      (async () => {
+        const finish = (payload, title) => {
+          document.title = title;
+          const pre = document.createElement("pre");
+          pre.id = "result";
+          pre.textContent = JSON.stringify(payload, null, 2);
+          document.body.appendChild(pre);
+        };
+        try {
+          // 无头浏览器可能节流 rAF，这里换成同语义的定时器，让「观察器 → 排帧 → 收紧」照常跑完。
+          window.requestAnimationFrame = (callback) => setTimeout(() => callback(performance.now()), 0);
+          window.cancelAnimationFrame = (id) => clearTimeout(id);
+          const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 20));
+          const checks = [];
+          const expect = (name, actual, expected) => {
+            checks.push({ name, actual, expected, ok: actual === expected });
+          };
+          const text = (element) => element.textContent.trim();
+
+          const sub = document.querySelector("#subagent");
+          const jobs = document.querySelector("#jobs");
+          const subCount = sub.querySelector(".count");
+          const jobsCount = jobs.querySelector(".count");
+          const split = document.querySelector('[data-open-target="directory"]');
+          const anchor = document.querySelector("#openAnchor");
+          const crumb = document.querySelector(".crumb");
+
+          const plugin = window.__module.factory();
+          const disposers = [];
+          plugin.apply({
+            effect(factory) {
+              disposers.push(factory());
+            },
+          });
+          await nextFrame();
+
+          const compact = window.matchMedia("(max-width: 767.98px)").matches;
+
+          if (compact) {
+            expect("子智能体可见文案", text(subCount), "智能体 3");
+            expect("后台任务可见文案", text(jobsCount), "后台 1");
+            expect("子智能体 aria", sub.getAttribute("aria-label"), "智能体 3，正在运行");
+            expect("后台任务 aria", jobs.getAttribute("aria-label"), "后台 1 运行中");
+            expect("在本地打开按钮隐藏", getComputedStyle(split).display, "none");
+            expect("按钮包裹层隐藏", getComputedStyle(anchor).display, "none");
+            expect("更多菜单仍在", getComputedStyle(document.querySelector("#more")).display !== "none", true);
+            expect("标题仍有宽度", crumb.getBoundingClientRect().width > 0, true);
+
+            // 模拟宿主重新渲染：把长文案写回同一个文本节点，观察器应再收紧。
+            subCount.firstChild.nodeValue = "4 个子智能体";
+            await nextFrame();
+            await nextFrame();
+            expect("宿主改写后再收紧", text(subCount), "智能体 4");
+
+            // 卸载即还原，顺带证明登记簿里记的是当前原文。
+            for (const dispose of disposers) dispose();
+            await nextFrame();
+            expect("卸载还原", text(subCount), "4 个子智能体");
+          } else {
+            expect("宽屏子智能体文案", text(subCount), "3 个子智能体");
+            expect("宽屏后台任务文案", text(jobsCount), "1 个后台任务运行中");
+            expect("宽屏子智能体 aria", sub.getAttribute("aria-label"), "3 个子智能体，正在运行");
+            expect("宽屏按钮仍在", getComputedStyle(split).display !== "none", true);
+            expect("宽屏包裹层仍在", getComputedStyle(anchor).display !== "none", true);
+          }
+
+          const failed = checks.filter((check) => !check.ok);
+          finish({ compact, checks }, failed.length === 0 ? `E2E PASS ${checks.length}` : `E2E FAIL ${failed.length}`);
+        } catch (error) {
+          finish({ error: String(error && error.stack ? error.stack : error) }, "E2E ERROR");
+        }
+      })();
+    </script>
+  </body>
+</html>
