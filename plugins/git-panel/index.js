@@ -35,6 +35,35 @@ const MAX_DIFF_LINES = 4000;
 /** 状态条目缓存的有效期：差异请求复用它来确认文件仍在改动列表里。 */
 const STATUS_CACHE_MS = 5_000;
 
+/** 分支列表最多回传多少个；超出的只统计不传。 */
+const MAX_BRANCHES = 200;
+/** 提交列表默认页大小。 */
+const LOG_PAGE_DEFAULT = 50;
+/** 客户端可请求的页面上限；再大就会明显拖慢渲染。 */
+const LOG_PAGE_MAX = 100;
+/** `--skip` 的上限：够翻到 5000 条，也挡住 `skip=999999999` 这类请求。 */
+const MAX_LOG_SKIP = 5_000;
+/** 单条提交正文最多回传的字符数。 */
+const MAX_BODY_CHARS = 1_000;
+/** 单行文本（标题、作者名）的展示上限。 */
+const MAX_LINE_CHARS = 200;
+/** 分支名里不允许出现的字符：控制字符与换行。 */
+const BRANCH_FORBIDDEN = /[\0\r\n]/u;
+
+/**
+ * `git for-each-ref` 的单行格式：字段以 NUL 分隔，一次进程拿全部分支元数据。
+ * `%(symref)` 用来跳过 `refs/remotes/origin/HEAD` 这类符号引用。
+ */
+const BRANCH_FORMAT =
+  "%(refname)%00%(refname:short)%00%(objectname)%00%(subject)%00%(authorname)" +
+  "%00%(committerdate:unix)%00%(upstream:short)%00%(HEAD)%00%(symref)";
+
+/**
+ * `git log` 的记录格式：字段 `%x1f` 分隔、记录 `%x1e` 收尾，正文里的换行不会破坏解析。
+ */
+const LOG_FORMAT =
+  "%H%x1f%h%x1f%an%x1f%ct%x1f%P%x1f%D%x1f%s%x1f%b%x1e";
+
 /** 以仓库根为键的最近一次 `git status` 条目。 */
 const statusEntryCache = new Map();
 
@@ -359,6 +388,109 @@ export function parseNumstat(stdout) {
 }
 
 /**
+ * 把一行文本压到展示上限，超长时补省略号。
+ * @param {string} value - 原文。
+ * @param {number} [limit] - 字符上限。
+ * @returns {string} 处理后的文本。
+ */
+function clampLine(value, limit = MAX_LINE_CHARS) {
+  const text = String(value ?? "").trim();
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+/**
+ * 把查询参数解析成受限整数，非法或越界时回落到默认值。
+ * @param {unknown} value - 原始值。
+ * @param {number} min - 下限。
+ * @param {number} max - 上限。
+ * @param {number} fallback - 无法解析时的值。
+ * @returns {number} 整数。
+ */
+function clampInt(value, min, max, fallback) {
+  const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  const integer = Math.trunc(parsed);
+  if (integer < min) return min;
+  if (integer > max) return max;
+  return integer;
+}
+
+/**
+ * 解析 `git for-each-ref` 的分支列表输出。
+ *
+ * 跳过符号引用（`refs/remotes/origin/HEAD`）与不是 heads/remotes 命名空间的引用。
+ * @param {string} stdout - 命令输出。
+ * @returns {Array<object>} 分支列表；当前分支带 `current: true`。
+ */
+export function parseBranches(stdout) {
+  const branches = [];
+  for (const line of String(stdout ?? "").split(/\r?\n/u)) {
+    if (line.trim() === "") continue;
+    const fields = line.split("\0");
+    if (fields.length < 9) continue;
+    const [refname, short, sha, subject, author, time, upstream, head, symref] = fields;
+    if (symref !== "") continue;
+    const kind = refname.startsWith("refs/heads/")
+      ? "local"
+      : refname.startsWith("refs/remotes/")
+        ? "remote"
+        : null;
+    if (kind === null) continue;
+    if (short === "" || sha === "") continue;
+    const seconds = Number.parseInt(time, 10);
+    branches.push({
+      name: short,
+      kind,
+      current: head === "*",
+      sha,
+      shortSha: sha.slice(0, 7),
+      subject: clampLine(subject),
+      author: clampLine(author, 60),
+      time: Number.isFinite(seconds) ? seconds : 0,
+      upstream: upstream === "" ? null : upstream,
+    });
+  }
+  return branches;
+}
+
+/**
+ * 解析 `git log` 的提交列表输出。
+ *
+ * 记录以 `\x1e` 收尾、字段以 `\x1f` 分隔；正文可能含换行，所以多余的字段
+ * 一律并回正文，而不是丢弃。
+ * @param {string} stdout - 命令输出。
+ * @returns {Array<object>} 提交列表。
+ */
+export function parseLog(stdout) {
+  const commits = [];
+  for (const chunk of String(stdout ?? "").split("\x1e")) {
+    const record = chunk.replace(/^\r?\n/u, "");
+    if (record.trim() === "") continue;
+    const fields = record.split("\x1f");
+    if (fields.length < 8) continue;
+    const [sha, shortSha, author, time, parents, refs, subject] = fields;
+    const body = fields
+      .slice(7)
+      .join("\x1f")
+      .replace(/[\r\n]+$/u, "");
+    if (sha === "") continue;
+    const seconds = Number.parseInt(time, 10);
+    commits.push({
+      sha,
+      shortSha: shortSha === "" ? sha.slice(0, 7) : shortSha,
+      author: clampLine(author, 60),
+      time: Number.isFinite(seconds) ? seconds : 0,
+      parents: parents === "" ? [] : parents.split(" ").filter(Boolean).map((item) => item.slice(0, 7)),
+      refs: refs === "" ? [] : refs.split(", ").filter(Boolean),
+      subject: clampLine(subject),
+      body: body.length > MAX_BODY_CHARS ? `${body.slice(0, MAX_BODY_CHARS)}…` : body,
+      bodyTruncated: body.length > MAX_BODY_CHARS,
+    });
+  }
+  return commits;
+}
+
+/**
  * 解析 unified diff 为逐 hunk 的行模型。
  *
  * 只保留 hunk 内的行；`\ No newline at end of file` 与文件头都跳过。超过行数上限
@@ -587,6 +719,142 @@ export async function readStatus(cwd, repo) {
 }
 
 /**
+ * 把 `cwd` + 可选的子仓库参数解析成要读的仓库根。
+ *
+ * 与 `/diff` 的分支解析保持一致：给了 `repo` 就必须是会话目录内的合法仓库，
+ * 否则报错而不是悄悄退回 `cwd` 所在的仓库。
+ * @param {string} cwd - 会话工作目录。
+ * @param {string | undefined} repo - 相对会话目录的仓库路径。
+ * @returns {Promise<{root: string} | {status: number, error: string}>} 仓库根或错误。
+ */
+async function targetRoot(cwd, repo) {
+  if (repo === undefined) {
+    const discovered = await discoverRepository(cwd);
+    if (!discovered.isRepo) return { status: 404, error: "not-a-repository" };
+    return { root: discovered.root };
+  }
+  const selected = resolveInside(cwd, repo);
+  if (selected === undefined) return { status: 400, error: "invalid-repo" };
+  if (!isGitRepository(selected)) return { status: 404, error: "not-a-repository" };
+  return { root: selected };
+}
+
+/**
+ * 读取仓库的分支列表。
+ *
+ * 一次 `for-each-ref` 拿全部分支的元数据；`ahead/behind` 只对当前分支算——
+ * 每个分支都算要多起 N 个 `rev-list` 进程，右栏用不上。
+ * @param {string} root - 仓库根。
+ * @returns {Promise<object>} 分支快照。
+ */
+export async function readBranches(root) {
+  const [list, headRef] = await Promise.all([
+    runGit(root, ["for-each-ref", `--format=${BRANCH_FORMAT}`, "refs/heads", "refs/remotes"]),
+    runGit(root, ["rev-parse", "--abbrev-ref", "HEAD"]),
+  ]);
+  if (!list.ok) {
+    return {
+      ok: false,
+      error: list.timeout ? "git-timeout" : "git-failed",
+      detail: firstLine(list.stderr),
+    };
+  }
+  const parsed = parseBranches(list.stdout);
+  const headName = headRef.ok ? headRef.stdout.trim() : "";
+  let current = null;
+  if (headName !== "" && headName !== "HEAD") {
+    const match = parsed.find((branch) => branch.kind === "local" && branch.name === headName);
+    if (match !== undefined) {
+      match.current = true;
+      if (match.upstream !== null) {
+        const counts = await runGit(root, ["rev-list", "--count", "--left-right", `${match.upstream}...HEAD`]);
+        if (counts.ok) {
+          // --left-right 的第一列是「上游有、我没有」（落后），第二列是「我有、上游没有」（领先）。
+          const [behind, ahead] = counts.stdout
+            .trim()
+            .split(/\s+/u)
+            .map((value) => Number.parseInt(value, 10));
+          match.behind = Number.isFinite(behind) ? behind : 0;
+          match.ahead = Number.isFinite(ahead) ? ahead : 0;
+        }
+      }
+    }
+    current = { name: headName, detached: false, sha: match?.sha ?? "" };
+  } else if (headName === "HEAD") {
+    const short = await runGit(root, ["rev-parse", "--short", "HEAD"]);
+    current = { name: null, detached: true, sha: short.ok ? short.stdout.trim() : "" };
+  }
+  const byTime = (left, right) => right.time - left.time || left.name.localeCompare(right.name);
+  const ordered = [
+    ...parsed.filter((branch) => branch.current),
+    ...parsed
+      .filter((branch) => !branch.current && branch.kind === "local")
+      .sort(byTime),
+    ...parsed.filter((branch) => branch.kind === "remote").sort(byTime),
+  ];
+  return {
+    ok: true,
+    current,
+    branches: ordered.slice(0, MAX_BRANCHES),
+    truncated: ordered.length > MAX_BRANCHES,
+  };
+}
+
+/**
+ * 取仓库里所有可引用的分支名，作为 `/commits` 的白名单。
+ * @param {string} root - 仓库根。
+ * @returns {Promise<Set<string> | undefined>} 分支名集合；git 失败时 undefined。
+ */
+async function branchRefs(root) {
+  const result = await runGit(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"]);
+  if (!result.ok) return undefined;
+  const names = new Set();
+  for (const line of result.stdout.split(/\r?\n/u)) {
+    const name = line.trim();
+    if (name !== "") names.add(name);
+  }
+  return names;
+}
+
+/**
+ * 读取一个分支（或分离头 `HEAD`）的提交历史。
+ *
+ * `branch` 必须命中白名单或是字面量 `HEAD`，避免把参数拼成任意 revision 表达式。
+ * @param {string} root - 仓库根。
+ * @param {string} branch - 分支名或 `HEAD`。
+ * @param {{allowed?: Set<string>, limit?: number, skip?: number}} [options] - 白名单与分页。
+ * @returns {Promise<object>} 提交快照。
+ */
+export async function readCommits(root, branch, options = {}) {
+  const allowed = options.allowed instanceof Set ? options.allowed : undefined;
+  if (allowed !== undefined && branch !== "HEAD" && !allowed.has(branch)) {
+    return { ok: false, error: "unknown-branch" };
+  }
+  const limit = clampInt(options.limit ?? LOG_PAGE_DEFAULT, 1, LOG_PAGE_MAX, LOG_PAGE_DEFAULT);
+  const skip = clampInt(options.skip ?? 0, 0, MAX_LOG_SKIP, 0);
+  const result = await runGit(root, [
+    "log",
+    `--format=${LOG_FORMAT}`,
+    "-n",
+    String(limit),
+    "--skip",
+    String(skip),
+    "--no-color",
+    branch,
+    "--",
+  ]);
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: result.timeout ? "git-timeout" : "git-failed",
+      detail: firstLine(result.stderr),
+    };
+  }
+  const commits = parseLog(result.stdout);
+  return { ok: true, branch, skip, limit, commits, hasMore: commits.length === limit };
+}
+
+/**
  * 读取一个仓库当前的改动条目，短时缓存。
  *
  * `/diff` 只接受这里列出的路径，避免把接口变成仓库内任意文件读取（例如
@@ -719,10 +987,24 @@ function parseUrl(raw) {
 }
 
 /**
- * 写 JSON 响应。
- * @param {object} res - ServerResponse。
- * @param {number} status - HTTP 状态码。
- * @param {unknown} payload - 响应体。
+ * 把 `readBranches` / `readCommits` 的错误码翻成 HTTP 状态码。
+ *
+ * 参数类错误（400）与「不是仓库」（404）由路由在解析阶段直接发出，不会走到这里。
+ * @param {string} code - 错误码。
+ * @returns {number} HTTP 状态码。
+ */
+export function httpStatusFor(code) {
+  if (code === "unknown-branch") return 409;
+  if (code === "git-timeout") return 504;
+  return 500;
+}
+
+/**
+ * 发送 JSON。
+ * @param {object} res - 响应。
+ * @param {number} status - 状态码。
+ * @param {object} payload - 响应体。
+ * @returns {void}
  */
 function sendJson(res, status, payload) {
   res.writeHead(status, JSON_HEADERS);
@@ -805,6 +1087,35 @@ export function createHandlers({ ctx }) {
         if (url.pathname === `${ROUTE_PREFIX}/repos`) {
           const found = findRepositories(cwd);
           return sendJson(res, 200, { ok: true, cwd, ...found });
+        }
+        if (url.pathname === `${ROUTE_PREFIX}/branches`) {
+          const target = await targetRoot(cwd, repo);
+          if (target.root === undefined) return sendError(res, target.status, target.error);
+          const branches = await readBranches(target.root);
+          if (branches.ok !== true) {
+            return sendError(res, httpStatusFor(branches.error), branches.error, branches.detail);
+          }
+          return sendJson(res, 200, { ...branches, root: target.root });
+        }
+        if (url.pathname === `${ROUTE_PREFIX}/commits`) {
+          const branch = (url.searchParams.get("branch") ?? "").trim();
+          if (branch === "") return sendError(res, 400, "missing-branch");
+          if (branch.startsWith("-") || BRANCH_FORBIDDEN.test(branch)) {
+            return sendError(res, 400, "invalid-branch");
+          }
+          const target = await targetRoot(cwd, repo);
+          if (target.root === undefined) return sendError(res, target.status, target.error);
+          const allowed = await branchRefs(target.root);
+          if (allowed === undefined) return sendError(res, 500, "git-failed");
+          const commits = await readCommits(target.root, branch, {
+            allowed,
+            limit: url.searchParams.get("limit") ?? undefined,
+            skip: url.searchParams.get("skip") ?? undefined,
+          });
+          if (commits.ok !== true) {
+            return sendError(res, httpStatusFor(commits.error), commits.error, commits.detail);
+          }
+          return sendJson(res, 200, { ...commits, root: target.root });
         }
         if (url.pathname === `${ROUTE_PREFIX}/diff`) {
           const filePath = url.searchParams.get("path") ?? "";

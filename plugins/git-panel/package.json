@@ -1,9 +1,9 @@
 {
   "name": "@local/git-panel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "右侧边栏的 Git 面板：选择会话目录下的子仓库，查看未提交文件（已暂存/未暂存/未跟踪）与逐文件差异",
+  "description": "右侧边栏的 Git 面板：选择会话目录下的子仓库，查看未提交文件（已暂存/未暂存/未跟踪）与逐文件差异，并浏览分支与每个分支的提交历史",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"

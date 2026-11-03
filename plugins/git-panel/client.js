@@ -12,6 +12,13 @@ window.__ModuleLoader__.load({
     const STYLE_ID = 'git-panel';
     /** 面板可见时的自动刷新间隔。 */
     const POLL_MS = 10_000;
+    /** 两个视图：改动与历史。 */
+    const VIEW_CHANGES = 'changes';
+    const VIEW_HISTORY = 'history';
+    /** 提交列表每页条数，与宿主的默认页保持一致。 */
+    const PAGE_SIZE = 50;
+    /** 提交列表最多加载到多少条，避免把整段历史读进面板。 */
+    const MAX_COMMITS = 500;
 
     /** 稳定错误码到中文的映射；Host 的 detail 另行显示。 */
     const ERROR_TEXT = {
@@ -21,6 +28,9 @@ window.__ModuleLoader__.load({
       'invalid-repo': '仓库路径无效',
       'invalid-path': '文件路径无效',
       'not-in-status': '该文件已不在当前改动列表，请刷新',
+      'unknown-branch': '这个分支已不存在',
+      'missing-branch': '缺少分支参数',
+      'invalid-branch': '分支名无效',
       'not-found': '文件不存在',
       'git-failed': 'git 执行失败',
       'git-timeout': 'git 执行超时',
@@ -412,6 +422,422 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 把 unix 秒格式化成「刚刚 / N 分钟前 / N 小时前 / N 天前」，更早的给日期。
+     * @param {number} unixSeconds - 提交时间（秒）。
+     * @returns {string} 展示文案。
+     */
+    function relativeTime(unixSeconds) {
+      const milliseconds = Number(unixSeconds) * 1000;
+      if (!Number.isFinite(milliseconds) || milliseconds <= 0) return '';
+      const diff = Date.now() - milliseconds;
+      if (diff < 60_000) return '刚刚';
+      const minutes = Math.floor(diff / 60_000);
+      if (minutes < 60) return `${minutes} 分钟前`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours} 小时前`;
+      const days = Math.floor(hours / 24);
+      if (days <= 7) return `${days} 天前`;
+      return shortDate(unixSeconds);
+    }
+
+    /**
+     * `YYYY-MM-DD`。
+     * @param {number} unixSeconds - unix 秒。
+     * @returns {string} 日期。
+     */
+    function shortDate(unixSeconds) {
+      const date = new Date(Number(unixSeconds) * 1000);
+      if (Number.isNaN(date.getTime())) return '';
+      const pad = (value) => String(value).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    }
+
+    /**
+     * `YYYY-MM-DD HH:mm`，按浏览器本地时区。
+     * @param {number} unixSeconds - unix 秒。
+     * @returns {string} 时间。
+     */
+    function absoluteTime(unixSeconds) {
+      const date = new Date(Number(unixSeconds) * 1000);
+      if (Number.isNaN(date.getTime())) return '';
+      const pad = (value) => String(value).padStart(2, '0');
+      return `${shortDate(unixSeconds)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    /**
+     * 追加一页提交，按 sha 去重（旧条目优先、保持顺序）。
+     * @param {object[]} previous - 已加载的提交。
+     * @param {object[]} next - 新一页的提交。
+     * @returns {object[]} 合并后的列表。
+     */
+    function mergeCommits(previous, next) {
+      const seen = new Set(previous.map((commit) => commit.sha));
+      const merged = [...previous];
+      for (const commit of next) {
+        if (seen.has(commit.sha)) continue;
+        seen.add(commit.sha);
+        merged.push(commit);
+      }
+      return merged;
+    }
+
+    /**
+     * 改动 / 历史的分段控件。
+     * @param {{view: string, onChange: Function}} props - 当前视图与切换回调。
+     * @returns {object} 节点。
+     */
+    function ViewSwitch({ view, onChange }) {
+      const item = (value, label) =>
+        h(
+          'button',
+          {
+            key: value,
+            type: 'button',
+            role: 'tab',
+            'aria-selected': view === value,
+            className: view === value ? 'gp-seg-btn gp-seg-on' : 'gp-seg-btn',
+            onClick: () => onChange(value),
+          },
+          label,
+        );
+      return h(
+        'div',
+        { className: 'gp-views', role: 'tablist', 'aria-label': '面板视图' },
+        item(VIEW_CHANGES, '改动'),
+        item(VIEW_HISTORY, '历史'),
+      );
+    }
+
+    /**
+     * 历史视图顶部的分支入口：点开选择分支的浮层。
+     * @param {{label: string, note: string, onOpen: Function, buttonRef: object}} props - 属性。
+     * @returns {object} 节点。
+     */
+    function BranchBar({ label, note, onOpen, buttonRef }) {
+      return h(
+        'button',
+        {
+          type: 'button',
+          ref: buttonRef,
+          className: 'gp-branchbar',
+          onClick: onOpen,
+          title: note === '' ? label : `${label}（${note}）`,
+          'aria-haspopup': 'dialog',
+        },
+        h('span', { className: 'gp-branchbar-icon' }, h(RepoIcon)),
+        h('span', { className: 'gp-branchbar-name' }, label),
+        h('span', { className: 'gp-branchbar-caret', 'aria-hidden': 'true' }, '▾'),
+      );
+    }
+
+    /**
+     * 分支选择浮层。
+     * @param {object} props - 分支数据、过滤词与回调。
+     * @returns {object} 节点。
+     */
+    function BranchPicker({ state, filter, onFilter, selected, onSelect, onClose }) {
+      const data = state.data;
+      const keyword = filter.trim().toLowerCase();
+      const groups =
+        data === null
+          ? []
+          : [
+              { id: 'local', title: '本地分支', items: (data.branches ?? []).filter((item) => item.kind === 'local') },
+              { id: 'remote', title: '远程分支', items: (data.branches ?? []).filter((item) => item.kind === 'remote') },
+            ].filter((group) => group.items.length > 0);
+      const matchOf = (item) => keyword === '' || item.name.toLowerCase().includes(keyword);
+      const visible = [];
+      for (const group of groups) {
+        for (const item of group.items) {
+          if (matchOf(item)) visible.push(item);
+        }
+      }
+      const [active, setActive] = useState(0);
+      const rowRefs = useRef(new Map());
+      // 过滤词变了：高亮收回第一条，避免指到已被过滤掉的行。
+      useEffect(() => {
+        setActive(0);
+      }, [filter]);
+      // 高亮移动时把该行滚进视口——键盘用户看不见鼠标在哪。
+      useEffect(() => {
+        const name = visible[active]?.name;
+        if (name === undefined) return;
+        rowRefs.current.get(name)?.scrollIntoView?.({ block: 'nearest' });
+      }, [active, visible.length]);
+      /**
+       * 浮层内的键盘操作：↑/↓ 移动高亮、Enter 选中、Esc 关闭。
+       * @param {object} event - 键盘事件。
+       * @returns {void}
+       */
+      const handleKeyDown = (event) => {
+        if (event.key === 'Escape') {
+          onClose();
+          return;
+        }
+        if (event.key === 'ArrowDown') {
+          event.preventDefault?.();
+          setActive((value) => (visible.length === 0 ? 0 : Math.min(value + 1, visible.length - 1)));
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault?.();
+          setActive((value) => Math.max(value - 1, 0));
+          return;
+        }
+        if (event.key === 'Enter') {
+          const target = visible[active];
+          if (target !== undefined) onSelect(target.name);
+        }
+      };
+      return h(
+        'div',
+        {
+          className: 'gp-branch-pop',
+          role: 'dialog',
+          'aria-label': '选择分支',
+          onKeyDown: handleKeyDown,
+        },
+        h(
+          'div',
+          { className: 'gp-picker-head' },
+          h('span', { className: 'gp-picker-title' }, '选择分支'),
+          h('button', { type: 'button', className: 'gp-text-btn', onClick: onClose }, '取消'),
+        ),
+        state.loading && data === null
+          ? h('div', { className: 'gp-notice' }, '读取分支…')
+          : state.error !== null && data === null
+            ? h(
+                'div',
+                { className: 'gp-notice' },
+                h('div', { className: 'gp-notice-text' }, errorText(state.error)),
+                h('button', { type: 'button', className: 'gp-text-btn', onClick: onClose }, '关闭'),
+              )
+            : h(
+                'div',
+                { className: 'gp-picker-body' },
+                h('input', {
+                  className: 'gp-filter',
+                  type: 'search',
+                  value: filter,
+                  placeholder: '筛选分支…',
+                  'aria-label': '筛选分支',
+                  autoFocus: true,
+                  onChange: (event) => onFilter(event.target.value),
+                }),
+                h(
+                  'div',
+                  { className: 'gp-repo-list' },
+                  groups.every((group) => group.items.every((item) => !matchOf(item)))
+                    ? h('div', { className: 'gp-notice' }, '没有匹配的分支')
+                    : groups.map((group) =>
+                        h(
+                          'div',
+                          { className: 'gp-branch-group', key: group.id },
+                          h('div', { className: 'gp-group-head' }, h('span', { className: 'gp-group-title' }, group.title)),
+                          group.items
+                            .filter((item) => matchOf(item))
+                            .map((item) =>
+                              h(
+                                'button',
+                                {
+                                  key: `${item.kind}:${item.name}`,
+                                  type: 'button',
+                                  ref: (node) => {
+                                    if (node === null || node === undefined) rowRefs.current.delete(item.name);
+                                    else rowRefs.current.set(item.name, node);
+                                  },
+                                  className: [
+                                    'gp-branch-item',
+                                    item.name === selected ? 'gp-branch-item-on' : '',
+                                    visible[active]?.name === item.name ? 'gp-branch-item-active' : '',
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' '),
+                                  'aria-current': item.current === true ? 'true' : undefined,
+                                  title: item.name,
+                                  onClick: () => onSelect(item.name),
+                                  onMouseEnter: () => setActive(visible.indexOf(item)),
+                                },
+                                h(
+                                  'span',
+                                  { className: 'gp-branch-item-name' },
+                                  item.name,
+                                  item.current === true
+                                    ? h('span', { className: 'gp-branch-item-tag' }, '当前')
+                                    : null,
+                                ),
+                                h(
+                                  'span',
+                                  { className: 'gp-branch-item-meta' },
+                                  item.time === 0 ? '无提交' : relativeTime(item.time),
+                                ),
+                              ),
+                            ),
+                        ),
+                      ),
+                ),
+              ),
+      );
+    }
+
+    /**
+     * 一条提交的详情。
+     * @param {{commit: object}} props - 提交。
+     * @returns {object} 节点。
+     */
+    function CommitDetail({ commit }) {
+      const row = (label, value, mono) =>
+        h(
+          'div',
+          { className: 'gp-cd-row', key: label },
+          h('span', { className: 'gp-cd-label' }, label),
+          h('span', { className: mono ? 'gp-cd-value gp-mono' : 'gp-cd-value' }, value),
+        );
+      return h(
+        'div',
+        { className: 'gp-cd' },
+        row('提交', commit.sha, true),
+        row('作者', commit.author),
+        row('时间', absoluteTime(commit.time)),
+        commit.parents.length === 0 ? null : row('父提交', commit.parents.join(' '), true),
+        commit.refs.length === 0 ? null : row('引用', commit.refs.join('、')),
+        commit.body === '' ? null : h('pre', { className: 'gp-cd-body' }, commit.body),
+        commit.bodyTruncated ? h('div', { className: 'gp-cd-note' }, '正文过长，已截断') : null,
+      );
+    }
+
+    /**
+     * 一条提交：可展开的摘要行。
+     * @param {{commit: object, expanded: boolean, onToggle: Function}} props - 属性。
+     * @returns {object} 节点。
+     */
+    function CommitRow({ commit, expanded, onToggle }) {
+      return h(
+        'div',
+        { className: expanded ? 'gp-commit gp-commit-open' : 'gp-commit' },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'gp-commit-sum',
+            onClick: onToggle,
+            'aria-expanded': expanded,
+            title: `${commit.shortSha} ${commit.subject}`,
+          },
+          h('span', { className: 'gp-commit-sha' }, commit.shortSha),
+          h(
+            'span',
+            { className: 'gp-commit-main' },
+            h('span', { className: 'gp-commit-subject' }, commit.subject),
+            h('span', { className: 'gp-commit-meta' }, `${commit.author} · ${relativeTime(commit.time)}`),
+          ),
+        ),
+        expanded ? h(CommitDetail, { commit }) : null,
+      );
+    }
+
+    /**
+     * 历史视图：当前分支、提交列表与加载更多。
+     * @param {object} props - 分支数据、提交分页与回调。
+     * @returns {object} 节点。
+     */
+    function HistoryView(props) {
+      const { state, commits, selected, picker, filter, onFilter, onOpen, onClose, onSelect, onLoadMore, onRetry, onExpand, expandedSha, buttonRef } = props;
+      const data = state.data;
+      const current = data?.current ?? null;
+      const found = (data?.branches ?? []).find((item) => item.name === selected);
+      const label =
+        current !== null && current.detached === true && selected === 'HEAD'
+          ? current.sha === ''
+            ? 'detached HEAD'
+            : `detached@${current.sha}`
+          : (found?.name ?? selected ?? '选择分支');
+      const note = found?.upstream === null || found?.upstream === undefined ? '' : `上游 ${found.upstream}`;
+      const emptyRepo = data !== null && (data.branches ?? []).length === 0;
+      const reachedCap = commits.items.length >= MAX_COMMITS;
+      return h(
+        'div',
+        { className: 'gp-history' },
+        h('div', { className: 'gp-branchbar-wrap' }, h(BranchBar, { label, note, onOpen, buttonRef })),
+        emptyRepo
+          ? h(
+              'div',
+              { className: 'gp-empty gp-empty-grow' },
+              h('strong', null, '空仓库（无提交）'),
+              h('span', null, '这个仓库还没有任何提交。'),
+            )
+          : state.error !== null && data === null
+            ? h(
+                'div',
+                { className: 'gp-notice' },
+                h('div', { className: 'gp-notice-text' }, errorText(state.error)),
+                h('button', { type: 'button', className: 'gp-text-btn', onClick: onRetry }, '重试'),
+              )
+            : h(
+                'div',
+                { className: 'gp-history-scroll' },
+                data?.truncated ? h('div', { className: 'gp-notice gp-notice-inline' }, '只列出前 200 个分支') : null,
+                state.error !== null && data !== null
+                  ? h(
+                      'div',
+                      { className: 'gp-notice gp-notice-inline gp-notice-error' },
+                      h('span', { className: 'gp-notice-text' }, errorText(state.error)),
+                      h('button', { type: 'button', className: 'gp-text-btn', onClick: onRetry }, '重试'),
+                    )
+                  : null,
+                commits.error !== null && commits.items.length > 0
+                  ? h(
+                      'div',
+                      { className: 'gp-notice gp-notice-inline gp-notice-error' },
+                      h('span', { className: 'gp-notice-text' }, errorText(commits.error)),
+                      h('button', { type: 'button', className: 'gp-text-btn', onClick: onRetry }, '重试'),
+                    )
+                  : null,
+                commits.error !== null && commits.items.length === 0
+                  ? h(
+                      'div',
+                      { className: 'gp-notice' },
+                      h('div', { className: 'gp-notice-text' }, errorText(commits.error)),
+                      h('button', { type: 'button', className: 'gp-text-btn', onClick: onRetry }, '重试'),
+                    )
+                  : commits.items.length === 0
+                    ? h('div', { className: 'gp-notice' }, commits.loading ? '读取提交…' : '这个分支还没有提交')
+                    : commits.items.map((commit) =>
+                        h(CommitRow, {
+                          key: commit.sha,
+                          commit,
+                          expanded: commit.sha === expandedSha,
+                          onToggle: () => onExpand(commit.sha === expandedSha ? null : commit.sha),
+                        }),
+                      ),
+                commits.items.length === 0
+                  ? null
+                  : reachedCap
+                    ? h('div', { className: 'gp-notice gp-notice-inline' }, '只显示最近 500 条提交')
+                    : commits.loading
+                      ? h('div', { className: 'gp-notice' }, '加载中…')
+                      : commits.pageError !== null
+                        ? h(
+                            'div',
+                            { className: 'gp-notice' },
+                            h('div', { className: 'gp-notice-text' }, errorText(commits.pageError)),
+                            h('button', { type: 'button', className: 'gp-text-btn', onClick: onLoadMore }, '重试'),
+                          )
+                        : commits.hasMore
+                          ? h(
+                              'button',
+                              { type: 'button', className: 'gp-more', onClick: onLoadMore },
+                              '加载更多',
+                            )
+                          : h('div', { className: 'gp-notice gp-notice-inline' }, '已经到底了'),
+              ),
+        picker
+          ? h(BranchPicker, { state, filter, onFilter, selected, onSelect, onClose })
+          : null,
+      );
+    }
+
+    /**
      * 行数统计。
      * @param {{stats: object | null}} props - 统计。
      * @returns {object | null} 节点。
@@ -666,6 +1092,23 @@ window.__ModuleLoader__.load({
       const backRef = useRef(null);
       const visible = tab.visible;
 
+      // ── 历史视图的状态 ──
+      const [view, setView] = useState(VIEW_CHANGES);
+      const [branchPicker, setBranchPicker] = useState(false);
+      const [branchFilter, setBranchFilter] = useState('');
+      const [branchState, setBranchState] = useState({ loading: false, error: null, data: null });
+      const [selectedBranch, setSelectedBranch] = useState(null);
+      const [commits, setCommits] = useState({ items: [], hasMore: false, loading: false, error: null, pageError: null });
+      // 分页游标不放 state：只有「加载更多」会写它，effect 读到即清零。这样刷新、
+      // 切视图、切分支引起的重跑一律从第一页开始，不会把旧的那一页再追加一遍。
+      const loadMoreSkip = useRef(0);
+      // 「加载更多」与「重试加载更多」都推进它：skip 不变（items 没变）时也能重发请求。
+      const [pageNonce, setPageNonce] = useState(0);
+      const [expandedSha, setExpandedSha] = useState(null);
+      const branchTicket = useRef(0);
+      const commitTicket = useRef(0);
+      const branchBarRef = useRef(null);
+
       /** 会话目录自身不是仓库、且还没选子仓库时，直接进入选择页。 */
       const pickerActive =
         picker || (repo === null && snapshot !== null && snapshot.ok === true && snapshot.isRepo === false);
@@ -716,6 +1159,138 @@ window.__ModuleLoader__.load({
         setRepo(next);
         setRefresh((current) => current + 1);
       };
+
+      /** 历史视图是否可以开始取数。 */
+      const historyReady =
+        view === VIEW_HISTORY &&
+        visible !== false &&
+        snapshot !== null &&
+        snapshot.ok === true &&
+        snapshot.isRepo === true;
+
+      /**
+       * 选中一个分支：重置分页与展开项，焦点交还给分支入口。
+       * @param {string} name - 分支名，或分离头时的 `HEAD`。
+       */
+      const selectBranch = (name) => {
+        setBranchPicker(false);
+        setBranchFilter('');
+        setExpandedSha(null);
+        loadMoreSkip.current = 0;
+        setSelectedBranch(name);
+        window.requestAnimationFrame(() => branchBarRef.current?.focus());
+      };
+
+      /** 打开分支选择浮层。 */
+      const openBranchPicker = () => {
+        setBranchFilter('');
+        setBranchPicker(true);
+      };
+
+      /** 关闭分支选择浮层，把焦点还给入口。 */
+      const closeBranchPicker = () => {
+        setBranchPicker(false);
+        window.requestAnimationFrame(() => branchBarRef.current?.focus());
+      };
+
+      /** 再取一页提交；跳过条数用已加载条数，避免与旧请求错位。 */
+      const loadMore = () => {
+        if (commits.loading || commits.hasMore !== true) return;
+        if (commits.items.length >= MAX_COMMITS) return;
+        loadMoreSkip.current = commits.items.length;
+        setPageNonce((value) => value + 1);
+      };
+
+      // 切会话 / 切仓库：历史状态整体清空，避免显示上一个仓库的分支。
+      useEffect(() => {
+        setBranchState({ loading: false, error: null, data: null });
+        setCommits({ items: [], hasMore: false, loading: false, error: null, pageError: null });
+        setSelectedBranch(null);
+        loadMoreSkip.current = 0;
+        setExpandedSha(null);
+        setBranchPicker(false);
+        setBranchFilter('');
+      }, [sessionId, repo]);
+
+      // 分支列表：进历史视图、手动刷新、轮询 tick 都重拉；只有首次加载才显示 loading。
+      useEffect(() => {
+        if (!historyReady) return undefined;
+        const ticket = ++branchTicket.current;
+        const controller = new AbortController();
+        setBranchState((current) => ({
+          ...current,
+          loading: current.data === null,
+          error: current.data === null ? null : current.error,
+        }));
+        getJson(`/git-panel/branches?${query({ session: sessionId, repo: repo ?? '' })}`, controller.signal)
+          .then((data) => {
+            if (branchTicket.current !== ticket || controller.signal.aborted) return;
+            setBranchState({ loading: false, error: null, data });
+            setSelectedBranch((previous) => {
+              if (previous === 'HEAD' && data.current?.detached === true) return previous;
+              if (previous !== null && (data.branches ?? []).some((item) => item.name === previous)) return previous;
+              if (data.current === null) return null;
+              return data.current.detached ? 'HEAD' : data.current.name;
+            });
+          })
+          .catch((failure) => {
+            if (branchTicket.current !== ticket || controller.signal.aborted) return;
+            setBranchState((current) => ({ ...current, loading: false, error: failure }));
+          });
+        return () => controller.abort();
+      }, [historyReady, sessionId, repo, refresh, tick]);
+
+      // 提交列表：切分支、手动刷新、加载更多都走这里；skip 为 0 时替换，否则追加。
+      useEffect(() => {
+        if (!historyReady || selectedBranch === null) return undefined;
+        const ticket = ++commitTicket.current;
+        const controller = new AbortController();
+        // 读一次就清零：任何非「加载更多」的重跑都从第一页开始。
+        const skip = loadMoreSkip.current;
+        loadMoreSkip.current = 0;
+        setCommits((current) => ({
+          ...current,
+          loading: true,
+          ...(skip === 0 ? { error: null, pageError: null } : {}),
+        }));
+        getJson(
+          `/git-panel/commits?${query({
+            session: sessionId,
+            repo: repo ?? '',
+            branch: selectedBranch,
+            skip: skip === 0 ? '' : String(skip),
+            limit: String(PAGE_SIZE),
+          })}`,
+          controller.signal,
+        )
+          .then((data) => {
+            if (commitTicket.current !== ticket || controller.signal.aborted) return;
+            setCommits((current) => ({
+              items: skip === 0 ? data.commits : mergeCommits(current.items, data.commits),
+              hasMore: data.hasMore === true,
+              loading: false,
+              error: null,
+              pageError: null,
+            }));
+          })
+          .catch((failure) => {
+            if (commitTicket.current !== ticket || controller.signal.aborted) return;
+            if (failure.code === 'unknown-branch') {
+              // 分支已被删掉：整体重来一次，分支列表会把选择回落到当前分支。
+              loadMoreSkip.current = 0;
+              setSelectedBranch(null);
+              setRefresh((value) => value + 1);
+              return;
+            }
+            setCommits((current) => ({
+              ...current,
+              loading: false,
+              error: skip === 0 ? failure : current.error,
+              pageError: skip === 0 ? null : failure,
+            }));
+          });
+        return () => controller.abort();
+      }, [historyReady, sessionId, repo, selectedBranch, refresh, pageNonce]);
 
       // 刷新命令（侧栏的刷新快捷键/按钮）只推进 refresh，轮询 tick 不会带动差异请求。
       useEffect(() => tab.actions.bindCommands({ refresh: () => setRefresh((value) => value + 1) }), [tab.actions]);
@@ -969,32 +1544,64 @@ window.__ModuleLoader__.load({
             h(RefreshIcon),
           ),
         ),
+        h(ViewSwitch, { view, onChange: setView }),
+        // 两个视图都保持挂载，只用 display 切换：卸载会丢掉改动列表的滚动位置（R1）。
         h(
           'div',
-          { className: 'gp-summary' },
-          h('span', null, `${snapshot.total} 个文件`),
-          snapshot.truncated ? h('span', { className: 'gp-summary-note' }, '只列出前 1000 个') : null,
-          error === null ? null : h('span', { className: 'gp-summary-error', title: errorText(error) }, '状态未同步'),
-        ),
-        groups.length === 0
-          ? h(
-              'div',
-              { className: 'gp-empty gp-empty-grow' },
-              h('strong', null, '工作区干净'),
-              h('span', null, '没有未提交的改动。'),
-            )
-          : h(
-              'div',
-              { className: 'gp-scroll' },
-              groups.map((group) =>
-                h(FileGroup, {
-                  key: group.id,
-                  group,
-                  onOpen: openFile,
-                  registerRow,
-                }),
+          {
+            className: view === VIEW_CHANGES ? 'gp-pane gp-pane-on' : 'gp-pane',
+            'aria-hidden': view === VIEW_CHANGES ? undefined : 'true',
+          },
+          h(
+            'div',
+            { className: 'gp-summary' },
+            h('span', null, `${snapshot.total} 个文件`),
+            snapshot.truncated ? h('span', { className: 'gp-summary-note' }, '只列出前 1000 个') : null,
+            error === null ? null : h('span', { className: 'gp-summary-error', title: errorText(error) }, '状态未同步'),
+          ),
+          groups.length === 0
+            ? h(
+                'div',
+                { className: 'gp-empty gp-empty-grow' },
+                h('strong', null, '工作区干净'),
+                h('span', null, '没有未提交的改动。'),
+              )
+            : h(
+                'div',
+                { className: 'gp-scroll' },
+                groups.map((group) =>
+                  h(FileGroup, {
+                    key: group.id,
+                    group,
+                    onOpen: openFile,
+                    registerRow,
+                  }),
+                ),
               ),
-            ),
+        ),
+        h(
+          'div',
+          {
+            className: view === VIEW_HISTORY ? 'gp-pane gp-pane-on' : 'gp-pane',
+            'aria-hidden': view === VIEW_HISTORY ? undefined : 'true',
+          },
+          h(HistoryView, {
+            state: branchState,
+            commits,
+            selected: selectedBranch,
+            picker: branchPicker,
+            filter: branchFilter,
+            onFilter: setBranchFilter,
+            onOpen: openBranchPicker,
+            onClose: closeBranchPicker,
+            onSelect: selectBranch,
+            onLoadMore: loadMore,
+            onRetry: () => setRefresh((value) => value + 1),
+            onExpand: setExpandedSha,
+            expandedSha,
+            buttonRef: branchBarRef,
+          }),
+        ),
       );
     }
 
@@ -1074,6 +1681,51 @@ window.__ModuleLoader__.load({
 [data-git-panel] .gp-line-add .gp-code{color:var(--dsw-alias-state-success-primary,#2e7d32)}
 [data-git-panel] .gp-line-del{background:var(--dsw-alias-code-diff-deleted,rgba(211,47,47,.09))}
 [data-git-panel] .gp-line-del .gp-code{color:var(--dsw-alias-state-error-primary,#d33)}
+[data-git-panel] .gp-pane{display:none;flex-direction:column;flex:1;min-height:0;min-width:0}
+[data-git-panel] .gp-pane-on{display:flex}
+[data-git-panel] .gp-branch-item-active{outline:2px solid var(--dsw-alias-brand-primary,#4176f5);outline-offset:-2px}
+[data-git-panel] .gp-branch-item-tag{display:inline-block;margin-left:6px;padding:0 4px;border-radius:4px;background:var(--dsw-alias-interactive-bg-active,rgba(128,128,128,.14));color:var(--dsw-alias-label-tertiary,#adb2b8);font-size:9px;font-weight:500;line-height:1.6;vertical-align:1px}
+[data-git-panel] .gp-notice-error{display:flex;align-items:center;gap:6px;justify-content:flex-start;text-align:left;color:var(--dsw-alias-state-warn-primary,#b26a00)}
+[data-git-panel] .gp-views{display:flex;gap:2px;padding:6px 10px 0;flex:0 0 auto}
+[data-git-panel] .gp-seg-btn{flex:0 0 auto;padding:3px 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,#adb2b8);font:inherit;font-size:11px;cursor:pointer}
+[data-git-panel] .gp-seg-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1));color:var(--dsw-alias-label-secondary,#5c6066)}
+[data-git-panel] .gp-seg-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4176f5);outline-offset:-2px}
+[data-git-panel] .gp-seg-on{background:var(--dsw-alias-interactive-bg-active,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,#14181f);font-weight:600}
+[data-git-panel] .gp-history{position:relative;display:flex;flex-direction:column;flex:1;min-height:0}
+[data-git-panel] .gp-branchbar-wrap{padding:6px 10px 2px;flex:0 0 auto}
+[data-git-panel] .gp-branchbar{display:flex;align-items:center;gap:6px;width:100%;min-width:0;padding:4px 6px;border:0;border-radius:6px;background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1));color:var(--dsw-alias-label-primary,#14181f);font:inherit;font-size:12px;cursor:pointer}
+[data-git-panel] .gp-branchbar:hover{background:var(--dsw-alias-interactive-bg-active,rgba(128,128,128,.16))}
+[data-git-panel] .gp-branchbar:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4176f5);outline-offset:-2px}
+[data-git-panel] .gp-branchbar-icon{flex:0 0 auto;display:inline-grid;place-items:center;color:var(--dsw-alias-label-tertiary,#adb2b8)}
+[data-git-panel] .gp-branchbar-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;font-weight:600}
+[data-git-panel] .gp-branchbar-caret{flex:0 0 auto;font-size:9px;color:var(--dsw-alias-label-tertiary,#adb2b8)}
+[data-git-panel] .gp-history-scroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:0 6px 16px}
+[data-git-panel] .gp-commit{border-radius:6px}
+[data-git-panel] .gp-commit-sum{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:8px;width:100%;padding:5px 6px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+[data-git-panel] .gp-commit-sum:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))}
+[data-git-panel] .gp-commit-sum:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4176f5);outline-offset:-2px}
+[data-git-panel] .gp-commit-open{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.08))}
+[data-git-panel] .gp-commit-sha{padding-top:1px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#adb2b8)}
+[data-git-panel] .gp-commit-main{display:flex;flex-direction:column;gap:1px;min-width:0}
+[data-git-panel] .gp-commit-subject{font-size:12px;color:var(--dsw-alias-label-primary,#14181f);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+[data-git-panel] .gp-commit-meta{font-size:10px;color:var(--dsw-alias-label-tertiary,#adb2b8);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+[data-git-panel] .gp-cd{display:flex;flex-direction:column;gap:3px;margin:0 6px 6px 30px;padding:6px 8px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:6px;background:var(--dsw-alias-bg-base,#fff)}
+[data-git-panel] .gp-cd-row{display:grid;grid-template-columns:40px minmax(0,1fr);gap:6px;min-width:0;font-size:11px}
+[data-git-panel] .gp-cd-label{color:var(--dsw-alias-label-tertiary,#adb2b8)}
+[data-git-panel] .gp-cd-value{min-width:0;color:var(--dsw-alias-label-secondary,#5c6066);word-break:break-word}
+[data-git-panel] .gp-cd-body{margin:4px 0 0;padding:6px 8px;border-radius:5px;background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.08));color:var(--dsw-alias-label-secondary,#5c6066);white-space:pre-wrap;word-break:break-word;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;max-height:200px;overflow:auto}
+[data-git-panel] .gp-cd-note{font-size:10px;color:var(--dsw-alias-state-warn-primary,#b26a00)}
+[data-git-panel] .gp-more{display:block;width:100%;margin:8px 0 0;padding:5px;border:1px dashed var(--dsw-alias-border-l2,rgba(128,128,128,.3));border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5c6066);font:inherit;font-size:11px;cursor:pointer}
+[data-git-panel] .gp-more:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))}
+[data-git-panel] .gp-branch-pop{position:absolute;inset:0;z-index:6;display:flex;flex-direction:column;min-height:0;padding:10px 8px 0;background:var(--dsw-alias-bg-base,#fff)}
+[data-git-panel] .gp-branch-group{margin-bottom:8px}
+[data-git-panel] .gp-branch-item{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;width:100%;padding:4px 6px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+[data-git-panel] .gp-branch-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))}
+[data-git-panel] .gp-branch-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4176f5);outline-offset:-2px}
+[data-git-panel] .gp-branch-item-on{background:var(--dsw-alias-interactive-bg-active,rgba(128,128,128,.14))}
+[data-git-panel] .gp-branch-item-name{min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+[data-git-panel] .gp-branch-item-on .gp-branch-item-name{font-weight:600}
+[data-git-panel] .gp-branch-item-meta{font-size:10px;color:var(--dsw-alias-label-tertiary,#adb2b8);white-space:nowrap}
 @media (prefers-reduced-motion: reduce){[data-git-panel] *{scroll-behavior:auto}}
 `;
 
@@ -1120,7 +1772,24 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'sidebarRightTabs'],
       /** 供单测直接调用的内部件；席位与宿主都不读它。 */
-      internals: { definition, groupsOf, splitPath, letterOf, kindOf, branchLabelOf, DiffBody, FileGroup, RepoPicker, GitBody },
+      internals: {
+        definition,
+        groupsOf,
+        splitPath,
+        letterOf,
+        kindOf,
+        branchLabelOf,
+        DiffBody,
+        FileGroup,
+        RepoPicker,
+        GitBody,
+        ViewSwitch,
+        BranchPicker,
+        CommitRow,
+        HistoryView,
+        relativeTime,
+        absoluteTime,
+      },
       apply(ctx) {
         ctx.effect(() => ensureStyle(), 'git-panel: styles');
         ctx.effect(() => ctx.sidebarRightTabs.register(definition()), 'git-panel: tab type');

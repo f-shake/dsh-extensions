@@ -6,13 +6,19 @@ import path from "node:path";
 import { after, test } from "node:test";
 
 import {
+  createHandlers,
   diffTargetMatches,
   findRepositories,
+  httpStatusFor,
   isSafeRelative,
   parseBranchHeader,
+  parseBranches,
+  parseLog,
   parseNumstat,
   parseStatus,
   parseUnifiedDiff,
+  readBranches,
+  readCommits,
   readDiff,
   readStatus,
   resolveInside,
@@ -363,4 +369,258 @@ test("readDiff 带 origPath 时按重命名比较两侧", async () => {
   const withoutOrig = await readDiff(directory, "renamed.txt", { staged: true });
   assert.equal(withoutOrig.ok, true);
   assert.equal(withoutOrig.additions, 3);
+});
+
+/**
+ * 追加一个提交。
+ * @param {string} directory - 仓库目录。
+ * @param {string} name - 文件名。
+ * @param {string} message - 提交信息。
+ */
+function commitFile(directory, name, message) {
+  writeFileSync(path.join(directory, name), `${message}\n`);
+  execFileSync("git", ["add", name], { cwd: directory, stdio: "ignore" });
+  execFileSync("git", ["commit", "-qm", message], { cwd: directory, stdio: "ignore" });
+}
+
+test("parseBranches 跳过符号引用并标出当前分支", () => {
+  const sha = "a".repeat(40);
+  const stdout = [
+    `refs/heads/main\u0000main\u0000${sha}\u0000initial\u0000Ada\u00001700000000\u0000origin/main\u0000*\u0000`,
+    `refs/heads/topic\u0000topic\u0000${sha}\u0000topic work\u0000Ada\u00001700001000\u0000\u0000\u0000`,
+    `refs/remotes/origin/main\u0000origin/main\u0000${sha}\u0000initial\u0000Ada\u00001700000000\u0000\u0000\u0000`,
+    `refs/remotes/origin/HEAD\u0000origin/HEAD\u0000${sha}\u0000initial\u0000Ada\u00001700000000\u0000\u0000\u0000refs/remotes/origin/main`,
+    "",
+  ].join("\n");
+
+  const branches = parseBranches(stdout);
+  assert.equal(branches.length, 3);
+  assert.deepEqual(
+    branches.map((branch) => [branch.name, branch.kind, branch.current]),
+    [
+      ["main", "local", true],
+      ["topic", "local", false],
+      ["origin/main", "remote", false],
+    ],
+  );
+  assert.equal(branches[0].shortSha, "aaaaaaa");
+  assert.equal(branches[0].upstream, "origin/main");
+  assert.equal(branches[2].upstream, null);
+  assert.equal(branches[0].time, 1700000000);
+});
+
+test("parseLog 容忍正文换行、空正文与多父提交", () => {
+  const sha = "a".repeat(40);
+  const parents = `${"b".repeat(40)} ${"c".repeat(40)}`;
+  const stdout = [
+    `${sha}\x1fabcedef\x1fAda\x1f1700000000\x1f${parents}\x1fHEAD -> main, origin/main\x1fsubject line\x1fbody line 1\nbody line 2\x1e`,
+    `${sha}\x1fabcedef\x1fAda\x1f1700000000\x1f\x1f\x1fsecond subject\x1f\x1e`,
+  ].join("\n");
+
+  const commits = parseLog(stdout);
+  assert.equal(commits.length, 2);
+  assert.equal(commits[0].body, "body line 1\nbody line 2");
+  assert.deepEqual(commits[0].parents, ["bbbbbbb", "ccccccc"]);
+  assert.deepEqual(commits[0].refs, ["HEAD -> main", "origin/main"]);
+  assert.equal(commits[0].subject, "subject line");
+  assert.deepEqual(commits[1].parents, []);
+  assert.deepEqual(commits[1].refs, []);
+  assert.equal(commits[1].body, "");
+});
+
+test("parseLog 截断过长的正文", () => {
+  const sha = "a".repeat(40);
+  const stdout = `${sha}\x1fabcedef\x1fAda\x1f1700000000\x1f\x1f\x1fsubject\x1f${"x".repeat(1500)}\x1e`;
+  const commits = parseLog(stdout);
+  assert.equal(commits[0].bodyTruncated, true);
+  assert.equal(commits[0].body.length, 1001);
+});
+
+test("readBranches 把当前分支排在首位，分离头时给出 detached", async () => {
+  const directory = createRepository();
+  execFileSync("git", ["branch", "topic"], { cwd: directory, stdio: "ignore" });
+
+  const listed = await readBranches(directory);
+  assert.equal(listed.ok, true);
+  assert.equal(listed.branches[0].current, true);
+  assert.ok(["master", "main"].includes(listed.branches[0].name));
+  assert.equal(listed.current.detached, false);
+  assert.equal(listed.current.name, listed.branches[0].name);
+
+  execFileSync("git", ["checkout", "-q", "--detach", "HEAD"], { cwd: directory, stdio: "ignore" });
+  const detached = await readBranches(directory);
+  assert.equal(detached.ok, true);
+  assert.equal(detached.current.detached, true);
+  assert.equal(detached.current.name, null);
+  assert.ok(detached.current.sha.length >= 7);
+});
+
+test("readBranches 对空仓库返回空列表", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "git-panel-unborn-"));
+  temporaryRoots.push(directory);
+  execFileSync("git", ["init", "-q"], { cwd: directory, stdio: "ignore" });
+  const listed = await readBranches(directory);
+  assert.equal(listed.ok, true);
+  assert.deepEqual(listed.branches, []);
+  assert.equal(listed.current, null);
+});
+
+test("readCommits 分页、hasMore 与白名单", async () => {
+  const directory = createRepository();
+  commitFile(directory, "a.txt", "second");
+  commitFile(directory, "b.txt", "third");
+  const branch = (await readBranches(directory)).current.name;
+  const allowed = new Set([branch]);
+
+  const first = await readCommits(directory, branch, { allowed, limit: 2 });
+  assert.equal(first.ok, true);
+  assert.equal(first.commits.length, 2);
+  assert.equal(first.commits[0].subject, "third");
+  assert.equal(first.hasMore, true);
+
+  const second = await readCommits(directory, branch, { allowed, limit: 2, skip: 2 });
+  assert.equal(second.commits.length, 1);
+  assert.equal(second.commits[0].subject, "initial");
+  assert.equal(second.hasMore, false);
+
+  const beyond = await readCommits(directory, branch, { allowed, limit: 2, skip: 50 });
+  assert.deepEqual(beyond.commits, []);
+  assert.equal(beyond.hasMore, false);
+
+  const denied = await readCommits(directory, "nope", { allowed });
+  assert.deepEqual(denied, { ok: false, error: "unknown-branch" });
+
+  const head = await readCommits(directory, "HEAD", { allowed, limit: 1 });
+  assert.equal(head.ok, true);
+  assert.equal(head.commits.length, 1);
+});
+
+test("createHandlers 的 branches 与 commits 路由映射错误码", async () => {
+  const directory = createRepository();
+  const session = { header: { cwd: directory } };
+  const ctx = {
+    sessions: { get: (id) => (id === "session-1" ? session : undefined) },
+    workingDirectory: { get: () => directory },
+  };
+  const { handle } = createHandlers({ ctx });
+  const call = (url) =>
+    new Promise((resolve) => {
+      const res = {
+        statusCode: 0,
+        writeHead(status) {
+          this.statusCode = status;
+          return this;
+        },
+        end(text) {
+          resolve({ status: this.statusCode, body: text === undefined ? null : JSON.parse(text) });
+        },
+      };
+      handle({ method: "GET", url }, res);
+    });
+
+  const branches = await call("/git-panel/branches?session=session-1");
+  assert.equal(branches.status, 200);
+  assert.equal(branches.body.ok, true);
+  assert.ok(Array.isArray(branches.body.branches));
+
+  const missing = await call("/git-panel/commits?session=session-1");
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.error, "missing-branch");
+
+  const invalid = await call("/git-panel/commits?session=session-1&branch=-x");
+  assert.equal(invalid.status, 400);
+  assert.equal(invalid.body.error, "invalid-branch");
+
+  const unknown = await call("/git-panel/commits?session=session-1&branch=nope");
+  assert.equal(unknown.status, 409);
+  assert.equal(unknown.body.error, "unknown-branch");
+
+  const name = (await readBranches(directory)).current.name;
+  const ok = await call(`/git-panel/commits?session=session-1&branch=${encodeURIComponent(name)}`);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.commits.length, 1);
+  assert.equal(ok.body.commits[0].subject, "initial");
+
+  const noSession = await call("/git-panel/branches?session=missing");
+  assert.equal(noSession.status, 404);
+  assert.equal(noSession.body.error, "session-unavailable");
+});
+
+test("parseBranches 与 parseLog 对空输出与畸形行返回空表", () => {
+  assert.deepEqual(parseBranches(""), []);
+  assert.deepEqual(parseBranches("garbage\n\n"), []);
+  assert.deepEqual(parseBranches("refs/heads/x\u0000x\u0000sha"), []);
+  assert.deepEqual(parseLog(""), []);
+  assert.deepEqual(parseLog("not-a-record"), []);
+});
+
+test("readBranches 超过 200 个分支时截断并标记", async () => {
+  const directory = createRepository();
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).trim();
+  const lines = [];
+  for (let index = 0; index < 205; index += 1) lines.push(`create refs/heads/b${index} ${sha}`);
+  execFileSync("git", ["update-ref", "--stdin"], { cwd: directory, input: `${lines.join("\n")}\n` });
+
+  const listed = await readBranches(directory);
+  assert.equal(listed.ok, true);
+  assert.equal(listed.truncated, true);
+  assert.equal(listed.branches.length, 200);
+  assert.equal(listed.branches[0].current, true);
+});
+
+test("readCommits 把 limit 钳在 1..100", async () => {
+  const directory = createRepository();
+  commitFile(directory, "a.txt", "second");
+  const branch = (await readBranches(directory)).current.name;
+  const allowed = new Set([branch]);
+
+  const zero = await readCommits(directory, branch, { allowed, limit: 0 });
+  assert.equal(zero.commits.length, 1);
+  assert.equal(zero.limit, 1);
+
+  const huge = await readCommits(directory, branch, { allowed, limit: 100000 });
+  assert.equal(huge.limit, 100);
+  assert.equal(huge.commits.length, 2);
+});
+
+test("httpStatusFor 只映射实际会走到的三个错误码", () => {
+  assert.equal(httpStatusFor("unknown-branch"), 409);
+  assert.equal(httpStatusFor("git-timeout"), 504);
+  assert.equal(httpStatusFor("git-failed"), 500);
+  assert.equal(httpStatusFor("internal-error"), 500);
+});
+
+test("branches / commits 路由对非法 repo 返回 400、对非仓库返回 404", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "git-panel-route-"));
+  const plain = path.join(workspace, "plain");
+  mkdirSync(plain);
+  temporaryRoots.push(workspace);
+  const session = { header: { cwd: workspace } };
+  const ctx = {
+    sessions: { get: (id) => (id === "session-1" ? session : undefined) },
+    workingDirectory: { get: () => workspace },
+  };
+  const { handle } = createHandlers({ ctx });
+  const call = (url) =>
+    new Promise((resolve) => {
+      const res = {
+        statusCode: 0,
+        writeHead(status) {
+          this.statusCode = status;
+          return this;
+        },
+        end(text) {
+          resolve({ status: this.statusCode, body: text === undefined ? null : JSON.parse(text) });
+        },
+      };
+      handle({ method: "GET", url }, res);
+    });
+
+  const escaped = await call("/git-panel/branches?session=session-1&repo=..");
+  assert.equal(escaped.status, 400);
+  assert.equal(escaped.body.error, "invalid-repo");
+
+  const plainRepo = await call("/git-panel/commits?session=session-1&repo=plain&branch=main");
+  assert.equal(plainRepo.status, 404);
+  assert.equal(plainRepo.body.error, "not-a-repository");
 });
