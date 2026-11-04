@@ -81,23 +81,42 @@ test("确认同一阶段（非阶段五）等于没点", () => {
   assert.equal(result.state, state);
 });
 
-test("前跳记录被跳过的阶段并写进消息", () => {
+test("前跳只记录没走到的阶段，消息里不提", () => {
   const state = applyEnter(createState(START), 2, START);
   const result = planConfirm(state, 4, START + 10);
   assert.equal(result.state.phase, 4);
   assert.deepEqual(result.state.skipped, [3]);
-  assert.equal(result.message, "确认跳到阶段 4（验证），跳过阶段 3。");
+  assert.equal(result.message, "确认进入阶段 4（验证）。");
 });
 
-test("直接点到阶段五：进入预提交，跳过项一并写明", () => {
+test("直接点到阶段五：进入预提交，消息只说进入预提交", () => {
   const state = applyEnter(createState(START), 2, START);
   const result = planConfirm(state, 5, START + 10);
   assert.equal(result.state.phase, 5);
   assert.equal(result.state.precommit, true);
   assert.equal(result.state.authorized, false);
   assert.deepEqual(result.state.skipped, [3, 4]);
-  assert.match(result.message, /确认跳到阶段 5（提交），跳过阶段 3、4。/);
-  assert.match(result.message, /进入预提交：列出计划提交的文件和提交信息，不要执行 git commit。/);
+  assert.equal(
+    result.message,
+    "确认进入阶段 5（提交）。进入预提交：列出计划提交的文件和提交信息，不要执行 git commit。",
+  );
+});
+
+test("发给模型的话里不出现「跳过」「跳到」「未做」", () => {
+  const cases = [
+    [2, 4, {}, "确认进入阶段 4（验证）。"],
+    [2, 5, {}, "确认进入阶段 5（提交）。进入预提交"],
+    [1, 4, { verify: ["release"] }, "确认进入阶段 4（验证）。验证方式"],
+    [1, 3, {}, "确认进入阶段 3（复核）。"],
+  ];
+  for (const [from, to, options, prefix] of cases) {
+    const state = applyEnter(createState(START), from, START);
+    const result = planConfirm(state, to, START + 10, 2000, options);
+    for (const word of ["跳过", "跳到", "未做"]) {
+      assert.ok(!result.message.includes(word), `${word}: ${result.message}`);
+    }
+    assert.ok(result.message.startsWith(prefix), result.message);
+  }
 });
 
 test("从阶段四正常进入阶段五同样先进预提交", () => {
@@ -237,13 +256,13 @@ test("已在 2b 再点开发等于没点", () => {
   assert.equal(result.state, state);
 });
 
-test("从 2a 直接走复核：只提一句 2b 未做，阶段二不算跳过", () => {
+test("从 2a 直接走复核：消息不提 2b，阶段二也不算没走到", () => {
   let state = applyEnter(createState(START), 1, START);
   state = planConfirm(state, 2, START + 10, 2000, { devSplit: true }).state;
   const result = planConfirm(state, 3, START + 20);
   assert.equal(result.state.phase, 3);
   assert.deepEqual(result.state.skipped, []);
-  assert.equal(result.message, "确认进入阶段 3（复核）。阶段 2b 未做。");
+  assert.equal(result.message, "确认进入阶段 3（复核）。");
   assert.equal(result.state.devMode, "single");
   assert.equal(result.state.devStep, null);
 });
@@ -255,7 +274,7 @@ test("点验证选两种方式：状态记住选项，消息带上方式", () =>
   assert.deepEqual(result.state.verify, ["unit", "e2e"]);
   assert.equal(
     result.message,
-    "确认进入阶段 4（验证），验证方式：全量单元测试、端到端验证。按选定方式执行，不要再问我选哪种。",
+    "确认进入阶段 4（验证）。验证方式：全量单元测试、端到端验证。按选定方式执行，不要再问我选哪种。",
   );
 });
 
@@ -266,17 +285,17 @@ test("验证方式可选「改动相关单元测试」：状态记住它，消�
   assert.deepEqual(result.state.verify, ["unit-scope", "e2e"]);
   assert.equal(
     result.message,
-    "确认进入阶段 4（验证），验证方式：改动相关单元测试、端到端验证。按选定方式执行，不要再问我选哪种。",
+    "确认进入阶段 4（验证）。验证方式：改动相关单元测试、端到端验证。按选定方式执行，不要再问我选哪种。",
   );
 });
 
-test("跳到阶段四时，跳过项与验证方式写在同一句里", () => {
+test("前跳到阶段四时，消息只带验证方式，不提没走到的阶段", () => {
   const state = applyEnter(createState(START), 2, START);
   const result = planConfirm(state, 4, START + 10, 2000, { verify: ["release"] });
   assert.deepEqual(result.state.skipped, [3]);
   assert.equal(
     result.message,
-    "确认跳到阶段 4（验证），跳过阶段 3，验证方式：发布测试。按选定方式执行，不要再问我选哪种。",
+    "确认进入阶段 4（验证）。验证方式：发布测试。按选定方式执行，不要再问我选哪种。",
   );
 });
 

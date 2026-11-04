@@ -166,12 +166,11 @@ function unique(values) {
 /**
  * 进入预提交：列出清单但不提交。
  * @param {object} state - 旧状态。
- * @param {number} target - 目标阶段（恒为 5）。
- * @param {number[]} skipped - 跳过的阶段。
+ * @param {number[]} skipped - 没走到的阶段；只记在状态里给条上划线，不写进消息。
  * @param {number} now - 当前时间。
  * @returns {{ state: object, message: string }} 新状态与要发给模型的话。
  */
-function planPrecommit(state, target, skipped, now) {
+function planPrecommit(state, skipped, now) {
   const next = commit(state, {
     phase: MAX_PHASE,
     pending: null,
@@ -183,13 +182,9 @@ function planPrecommit(state, target, skipped, now) {
     devStep: null,
     verify: [],
   });
-  const jumped = target - state.phase > 1 && skipped.length > 0;
-  const head = jumped
-    ? `确认跳到阶段 5（提交），跳过阶段 ${skipped.join("、")}。`
-    : `确认进入阶段 5（提交）。`;
   return {
     state: next,
-    message: `${head}进入预提交：列出计划提交的文件和提交信息，不要执行 git commit。`,
+    message: "确认进入阶段 5（提交）。进入预提交：列出计划提交的文件和提交信息，不要执行 git commit。",
   };
 }
 
@@ -202,7 +197,7 @@ function planPrecommit(state, target, skipped, now) {
  */
 function planCommitClick(state, now, cooldownMs) {
   if (state.authorized) return { state, message: null, reason: "already-authorized" };
-  if (!state.precommit) return planPrecommit(state, MAX_PHASE, state.skipped, now);
+  if (!state.precommit) return planPrecommit(state, state.skipped, now);
   if (now - state.precommitAt < cooldownMs) return { state, message: null, reason: "cooldown" };
   return {
     state: commit(state, { authorized: true, pending: null }),
@@ -268,18 +263,14 @@ export function planConfirm(
 
   const jumped = range(state.phase + 1, target - 1);
   const skipped = unique([...state.skipped.filter((item) => item < target), ...jumped]);
-  const jumping = skipped.length > 0 && target - state.phase > 1;
-  // 从 2a 直接走掉：2b 没做，但阶段二并不算「跳过」，所以只提一句，不进跳过集合。
-  const stepNote = state.devStep === "a" && target > 2 ? "阶段 2b 未做。" : "";
+  // 没走到的阶段只记在状态里（条上划掉），一个字都不写进给模型的消息：
+  // 那句「阶段 N 未做」既容易被读成「特意略过」，也和条上的实际状态未必对得上。
 
   if (target === MAX_PHASE) {
-    const plan = planPrecommit(state, target, skipped, now);
-    return { ...plan, message: `${plan.message}${stepNote}` };
+    return planPrecommit(state, skipped, now);
   }
 
-  const head = jumping
-    ? `确认跳到阶段 ${target}（${phaseName(target)}），跳过阶段 ${skipped.join("、")}。`
-    : `确认进入阶段 ${target}（${phaseName(target)}）。`;
+  const head = `确认进入阶段 ${target}（${phaseName(target)}）。`;
   const done = (extra, message) => ({
     state: commit(state, {
       phase: target,
@@ -292,7 +283,7 @@ export function planConfirm(
       ...(target === 2 ? {} : { devMode: "single", devStep: null }),
       ...extra,
     }),
-    message: `${message}${stepNote}`,
+    message,
   });
 
   if (target === 2) {
@@ -303,12 +294,9 @@ export function planConfirm(
   }
 
   if (target === 4 && Array.isArray(options.verify) && options.verify.length > 0) {
-    const lead = jumping
-      ? `确认跳到阶段 4（验证），跳过阶段 ${skipped.join("、")}，`
-      : "确认进入阶段 4（验证），";
     return done(
       { verify: [...options.verify] },
-      `${lead}验证方式：${verifyLabels(options.verify)}。按选定方式执行，不要再问我选哪种。`,
+      `${head}验证方式：${verifyLabels(options.verify)}。按选定方式执行，不要再问我选哪种。`,
     );
   }
 
