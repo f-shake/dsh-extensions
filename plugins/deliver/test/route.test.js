@@ -260,6 +260,9 @@ test("列表：只给未过期未撤销的，新的在前，字段够客户端�
     assert.equal(first.files[0].size, 6);
     assert.equal(first.files[0].sizeText, "6 B");
     assert.equal(first.files[0].url, `/deliver/${newer.id}/0`);
+    // 预览要用：绝对路径与会话 id 都得带出来，少了就拼不出文件地址。
+    assert.equal(first.files[0].absPath, file);
+    assert.equal(typeof first.sessionId, "string");
     assert.ok(first.expiresAt > first.createdAt);
   });
 });
@@ -390,10 +393,13 @@ test("列表：session 参数只返回该会话的投递，缺省仍是全部", 
 
     const filtered = await fetch(`${base}/deliver/list?session=session-a`);
     assert.equal(filtered.status, 200);
+    const minePayload = await filtered.json();
     assert.deepEqual(
-      (await filtered.json()).deliveries.map((item) => item.id),
+      minePayload.deliveries.map((item) => item.id),
       [mine.id],
     );
+    // 预览地址要按会话拼，所以列表必须带上会话 id。
+    assert.equal(minePayload.deliveries[0].sessionId, "session-a");
 
     const all = await fetch(`${base}/deliver/list`);
     assert.equal((await all.json()).deliveries.length, 2);

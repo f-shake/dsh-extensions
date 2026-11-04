@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
      * 从工具结果的 meta 里读出投递信息。格式不对就返回 null，让卡片退回纯文本，
      * 不要因为一条老记录把整个视图弄崩。
      * @param {object} block - 工具结果节点。
-     * @returns {{ deliveryId: string, expiresAt: number, files: object[] } | null} 投递信息。
+     * @returns {{ deliveryId: string, sessionId: string, expiresAt: number, files: object[] } | null} 投递信息。
      */
     function readMeta(block) {
       const meta = block !== null && typeof block === 'object' ? block.meta : undefined;
@@ -49,10 +49,13 @@ window.__ModuleLoader__.load({
           name: item.name,
           sizeText: typeof item.sizeText === 'string' ? item.sizeText : '',
           url: item.url,
+          // 老记录没有绝对路径：预览按钮据此自己禁用，下载不受影响。
+          absPath: typeof item.absPath === 'string' ? item.absPath : '',
         });
       }
       return {
         deliveryId: meta.deliveryId,
+        sessionId: typeof meta.sessionId === 'string' ? meta.sessionId : '',
         expiresAt: typeof meta.expiresAt === 'number' ? meta.expiresAt : 0,
         files,
       };
@@ -146,6 +149,30 @@ window.__ModuleLoader__.load({
       return TILE_TONES[String(ext).toLowerCase()] ?? '#4a4a52';
     }
 
+    /**
+     * 地址里的一段：照常编码，但把盘符的冒号留着——内置预览靠 `C:` 认出绝对路径。
+     * @param {string} text - 原始片段。
+     * @returns {string} 编码结果。
+     */
+    function encodeSegment(text) {
+      return encodeURIComponent(text).replace(/%3A/gi, ':');
+    }
+
+    /**
+     * 内置预览认的文件地址：会话 + 宿主上的绝对路径。
+     * @param {string} sessionId - 会话 id。
+     * @param {string} absPath - 绝对路径（反斜杠会归一成 `/`）。
+     * @returns {string} `dsh-resource://file/session/…` 地址。
+     */
+    function fileAddress(sessionId, absPath) {
+      const path = String(absPath)
+        .replace(/\\/g, '/')
+        .split('/')
+        .map(encodeSegment)
+        .join('/');
+      return `dsh-resource://file/session/${encodeSegment(sessionId)}/${path}`;
+    }
+
     /** 注入一次样式。插件反复加载时不要重复插。 */
     function ensureStyle() {
       if (document.getElementById(STYLE_ID) !== null) return;
@@ -167,6 +194,7 @@ window.__ModuleLoader__.load({
         '.dlv-name{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
         '.dlv-meta{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
         '.dlv-get{display:inline-flex;align-items:center;flex:0 0 auto}',
+        '.dlv-act{display:inline-flex;align-items:center;gap:6px;flex:0 0 auto}',
         '.dlv-btn{flex:0 0 auto;border:1px solid var(--dsw-alias-border-l2,#ffffff1f);border-radius:8px;',
         'background:none;padding:3px 10px;cursor:pointer;font:inherit;font-size:12px;',
         'color:var(--dsw-alias-label-primary,#f9fafb)}',
@@ -198,9 +226,74 @@ window.__ModuleLoader__.load({
 
     /**
      * 组件工厂。组件本身只用传进来的 React，不直接碰 DOM。
+     * @param {{ openPreview?: (sessionId: string, file: object) => void }} deps - 预览入口（由宿主侧注入，测试里可替换）。
      * @returns {{ DeliverRow: Function, BoxBody: Function, TurnTailCard: Function, FileRow: Function, FileTile: Function, DownloadButton: Function }} 组件。
      */
-    function createComponents() {
+    function createComponents(deps = {}) {
+      const openPreview = typeof deps.openPreview === 'function' ? deps.openPreview : null;
+
+      /**
+       * 预览入口：先确认这份投递还有效，再交给右侧栏内置预览。
+       *
+       * 内置预览直接读磁盘，绕开投递表；不先 HEAD 一次，撤销过的文件还会被打开，
+       * 和下载按钮的「已失效」自相矛盾。
+       * @param {{ file: object, sessionId: string }} props - 组件属性。
+       * @returns {object} 元素。
+       */
+      function PreviewButton({ file, sessionId }) {
+        const [state, setState] = React.useState('idle');
+        const ref = React.useRef(null);
+
+        // 和下载按钮同一条约束：检查期间按钮被禁用，焦点会被浏览器收走；失败后要还回来。
+        React.useEffect(() => {
+          if (state !== 'error' && state !== 'gone') return;
+          if (ref.current === null || typeof ref.current.focus !== 'function') return;
+          ref.current.focus();
+        }, [state]);
+
+        async function onPreview() {
+          if (state === 'busy' || openPreview === null) return;
+          if (typeof file.absPath !== 'string' || file.absPath === '') return;
+          setState('busy');
+          let next = 'idle';
+          try {
+            const response = await fetch(file.url, { method: 'HEAD', credentials: 'same-origin' });
+            if (response.ok) {
+              openPreview(sessionId, file);
+              setState('idle');
+              return;
+            }
+            next = response.status === 404 || response.status === 410 ? 'gone' : 'error';
+          } catch {
+            next = 'error';
+          }
+          setState(next);
+        }
+
+        const flag = state === 'gone' ? '已失效' : state === 'error' ? '打不开' : '';
+
+        return h(
+          'span',
+          { className: 'dlv-get' },
+          h('span', { className: 'dlv-flag', role: 'status', 'aria-live': 'polite' }, flag),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dlv-btn',
+              ref,
+              title: state === 'gone' ? '链接已失效（过期、撤销，或 dsh 重启过）' : '在右侧栏预览',
+              'aria-busy': state === 'busy' ? 'true' : undefined,
+              // 与下载按钮一致：只在检查期间禁用；失效态用 aria-disabled 保留可聚焦。
+              'aria-disabled': state === 'gone' ? 'true' : undefined,
+              disabled: state === 'busy',
+              onClick: onPreview,
+            },
+            '预览',
+          ),
+        );
+      }
+
       /**
        * 下载入口：先 HEAD 一次确认还能下，再整页导航。
        *
@@ -283,11 +376,11 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 一行文件：色块、名称、灰色说明、右侧下载。
-       * @param {{ file: object, extra?: string }} props - 文件与附加说明。
+       * 一行文件：色块、名称、灰色说明、右侧预览与下载。
+       * @param {{ file: object, extra?: string, disabled?: boolean, sessionId?: string }} props - 文件与附加说明。
        * @returns {object} 元素。
        */
-      function FileRow({ file, extra, disabled }) {
+      function FileRow({ file, extra, disabled, sessionId }) {
         const ext = fileExt(file.name);
         return h(
           'div',
@@ -303,7 +396,18 @@ window.__ModuleLoader__.load({
               extra === undefined || extra === '' ? file.sizeText : `${file.sizeText} · ${extra}`,
             ),
           ),
-          disabled === true ? null : h(DownloadButton, { url: file.url }),
+          disabled === true
+            ? null
+            : h(
+                'span',
+                { className: 'dlv-act' },
+                // 老记录没有绝对路径、或拿不到会话时，预览按钮不出现——按了也没用。
+                // 会话 id 是可选属性，判空必须按类型，`undefined !== ''` 会把它放行。
+                typeof file.absPath === 'string' && file.absPath !== '' && typeof sessionId === 'string' && sessionId !== ''
+                  ? h(PreviewButton, { file, sessionId })
+                  : null,
+                h(DownloadButton, { url: file.url }),
+              ),
         );
       }
 
@@ -371,6 +475,7 @@ window.__ModuleLoader__.load({
             h(FileRow, {
               key: String(file.index),
               file,
+              sessionId: typeof meta.sessionId === 'string' ? meta.sessionId : '',
               disabled: revoked,
               extra: revoked ? '已撤销' : remain,
             }),
@@ -484,7 +589,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
               files.map((file) =>
-                h(FileRow, { key: `${delivery.id}-${file.index}`, file }),
+                h(FileRow, { key: `${delivery.id}-${file.index}`, file, sessionId: delivery.sessionId }),
               ),
             ),
           );
@@ -572,6 +677,7 @@ window.__ModuleLoader__.load({
               h(FileRow, {
                 key: `${delivery.id}-${file.index}`,
                 file,
+                sessionId: delivery.sessionId,
                 extra: remainingText(delivery.expiresAt, now),
               }),
             );
@@ -585,15 +691,27 @@ window.__ModuleLoader__.load({
         );
       }
 
-      return { DeliverRow, BoxBody, TurnTailCard, FileRow, FileTile, DownloadButton };
+      return { DeliverRow, BoxBody, TurnTailCard, FileRow, FileTile, DownloadButton, PreviewButton };
     }
 
     return {
-      inject: ['slots', 'sidebarRightTabs'],
+      inject: ['slots', 'sidebarRightTabs', 'sidebarRight'],
       apply(ctx) {
         ctx.effect(() => ensureStyle(), 'deliver: styles');
 
-        const components = createComponents();
+        const components = createComponents({
+          /**
+           * 把文件交给右侧栏的内置预览：地址带上会话与绝对路径。
+           * @param {string} sessionId - 会话 id。
+           * @param {{ absPath?: string }} file - 投递的文件。
+           */
+          openPreview(sessionId, file) {
+            if (typeof file?.absPath !== 'string' || file.absPath === '') return;
+            // 会话 id 只能是字符串：拼进地址前再挡一次，别把 undefined 编码成字面量。
+            if (typeof sessionId !== 'string' || sessionId === '') return;
+            ctx.sidebarRight.openResource(fileAddress(sessionId, file.absPath));
+          },
+        });
 
         ctx.slots.inject('tool.call.toolview', () =>
           ctx.slots.register(
@@ -648,6 +766,8 @@ window.__ModuleLoader__.load({
         deliveriesInTurn,
         fileExt,
         tileTone,
+        encodeSegment,
+        fileAddress,
         createComponents,
       },
       /** 替身 React 引用：用例要切 `useState` 初值去渲染 busy / gone / error 三态。 */

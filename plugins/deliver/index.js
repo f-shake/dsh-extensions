@@ -582,6 +582,7 @@ export function createHandlers({ store, clock = Date.now, openFile = open }) {
         const session = url.searchParams.get("session") ?? "";
         const deliveries = store.list(session).map((record) => ({
           id: record.id,
+          sessionId: record.sessionId,
           createdAt: record.createdAt,
           expiresAt: record.expiresAt,
           files: record.files.map((file) => ({
@@ -590,6 +591,8 @@ export function createHandlers({ store, clock = Date.now, openFile = open }) {
             size: file.size,
             sizeText: formatSize(file.size),
             url: fileUrl(record.id, file.index),
+            // 绝对路径是右侧栏预览的原料：内置预览按「会话 + 路径」认文件。
+            absPath: file.absPath,
           })),
         }));
         return sendJson(res, 200, { ok: true, now, deliveries }, headOnly);
@@ -661,6 +664,7 @@ export function createTool({ store, limits, resolveCwd }) {
         type: "object",
         properties: {
           deliveryId: { type: "string" },
+          sessionId: { type: "string" },
           expiresAt: { type: "number" },
           files: {
             type: "array",
@@ -672,8 +676,9 @@ export function createTool({ store, limits, resolveCwd }) {
                 size: { type: "number" },
                 sizeText: { type: "string" },
                 url: { type: "string" },
+                absPath: { type: "string" },
               },
-              required: ["index", "name", "size", "sizeText", "url"],
+              required: ["index", "name", "size", "sizeText", "url", "absPath"],
               additionalProperties: false,
             },
           },
@@ -690,7 +695,7 @@ export function createTool({ store, limits, resolveCwd }) {
             },
           },
         },
-        required: ["deliveryId", "expiresAt", "files", "failed"],
+        required: ["deliveryId", "sessionId", "expiresAt", "files", "failed"],
         additionalProperties: false,
       },
       render(_args, value) {
@@ -711,6 +716,7 @@ export function createTool({ store, limits, resolveCwd }) {
       presentationMeta(_args, value) {
         return {
           deliveryId: value.deliveryId,
+          sessionId: value.sessionId,
           expiresAt: value.expiresAt,
           files: value.files,
         };
@@ -738,6 +744,7 @@ export function createTool({ store, limits, resolveCwd }) {
       const record = store.create(accepted, sessionIdOf(exec?.agent));
       return {
         deliveryId: record.id,
+        sessionId: record.sessionId ?? "",
         expiresAt: record.expiresAt,
         files: record.files.map((file) => ({
           index: file.index,
@@ -745,6 +752,7 @@ export function createTool({ store, limits, resolveCwd }) {
           size: file.size,
           sizeText: formatSize(file.size),
           url: fileUrl(record.id, file.index),
+          absPath: file.absPath,
         })),
         failed,
       };

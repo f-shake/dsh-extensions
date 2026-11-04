@@ -52,11 +52,15 @@ test("工具：绝对路径投递成功，返回值与 meta 字段齐全", async
     assert.equal(value.files[0].sizeText, "10 B");
     assert.equal(value.files[0].index, 0);
     assert.equal(value.files[0].url, `/deliver/${value.deliveryId}/0`);
+    // 绝对路径是右侧栏预览的原料：客户端拿不到它就没法拼文件地址。
+    assert.equal(value.files[0].absPath, file);
+    assert.equal(value.sessionId, "session-1");
     assert.ok(value.expiresAt > 0);
 
     const meta = tool.output.presentationMeta({}, value);
     assert.deepEqual(meta, {
       deliveryId: value.deliveryId,
+      sessionId: "session-1",
       expiresAt: value.expiresAt,
       files: [
         {
@@ -65,6 +69,7 @@ test("工具：绝对路径投递成功，返回值与 meta 字段齐全", async
           size: 10,
           sizeText: "10 B",
           url: `/deliver/${value.deliveryId}/0`,
+          absPath: file,
         },
       ],
     });

@@ -14,12 +14,14 @@ const here = dirname(fileURLToPath(import.meta.url));
  * import；这里给一个最简 loader、假 React 与假 document。假 React 的 `createElement`
  * 返回元素树，因此组件级用例可以直接调用组件检查渲染结果（真渲染仍走浏览器，手工验）。
  * @returns {object} 模块导出。
+ * @param {{ fetch?: Function }} [options] - 可选替身：组件里的 HEAD 检查要看它。
  */
-function loadClientModule() {
+function loadClientModule(options = {}) {
   const source = readFileSync(join(here, "..", "client.js"), "utf8");
   let definition = null;
   const appended = [];
   const sandbox = {
+    fetch: options.fetch,
     window: {
       __ModuleLoader__: {
         load(value) {
@@ -59,12 +61,14 @@ function loadClientModule() {
 test("客户端模块：声明的注入服务与导出完整", () => {
   const module = loadClientModule();
   // 跨 realm 的数组原型不同，deepStrictEqual 会失败，先摊平成普通数组。
-  assert.deepEqual([...module.inject], ["slots", "sidebarRightTabs"]);
+  assert.deepEqual([...module.inject], ["slots", "sidebarRightTabs", "sidebarRight"]);
   assert.equal(typeof module.apply, "function");
   assert.deepEqual([...Object.keys(module.__test)].sort(), [
     "createComponents",
     "deliveriesInTurn",
+    "encodeSegment",
     "errorText",
+    "fileAddress",
     "fileExt",
     "readMeta",
     "remainingText",
@@ -146,19 +150,81 @@ test("客户端 apply：注册工具视图与投递箱页类型，样式只插�
   assert.equal(module.__appended.length, 1);
 });
 
-test("FileRow：正常渲染下载组件，disabled 时整行没有下载", () => {
-  const { FileRow, DownloadButton } = loadClientModule().__test.createComponents();
-  const file = { index: 0, name: "a.pdf", sizeText: "1 KB", url: "/deliver/x/0" };
-  const hasDownload = (tree) =>
-    tree.children.some((child) => child !== null && typeof child === "object" && child.type === DownloadButton);
+test("FileRow：预览与下载并排，disabled 时两个都不给", () => {
+  const { FileRow, DownloadButton, PreviewButton } = loadClientModule().__test.createComponents();
+  const file = { index: 0, name: "a.pdf", sizeText: "1 KB", url: "/deliver/x/0", absPath: "C:/tmp/a.pdf" };
+  const actOf = (tree) =>
+    tree.children.find(
+      (child) => child !== null && typeof child === "object" && child.props?.className === "dlv-act",
+    );
 
-  assert.ok(hasDownload(FileRow({ file })));
-  assert.ok(!hasDownload(FileRow({ file, disabled: true })));
+  const act = actOf(FileRow({ file, sessionId: "s1" }));
+  assert.equal(act.children.length, 2);
+  // 预览在左、下载在右，与需求里的「下载按钮左侧」一致。
+  assert.equal(act.children[0].type, PreviewButton);
+  assert.equal(act.children[1].type, DownloadButton);
+  assert.equal(actOf(FileRow({ file, sessionId: "s1", disabled: true })), undefined);
+
+  // 老记录（没有 absPath）或没有会话 id 时只剩下载，不留一个按了没反应的按钮。
+  assert.equal(actOf(FileRow({ file: { ...file, absPath: "" }, sessionId: "s1" })).children[0], null);
+  assert.equal(actOf(FileRow({ file, sessionId: "" })).children[0], null);
+  // sessionId 是可选属性：没传时是 undefined，`undefined !== ''` 会把它放行。
+  assert.equal(actOf(FileRow({ file })).children[0], null);
+
   // 说明行要带上额外信息（大小 · 剩余时间）。
   const info = FileRow({ file, extra: "还有 3 小时" }).children.find(
     (child) => child !== null && typeof child === "object" && child.props?.className === "dlv-info",
   );
   assert.equal(info.children[1].children[0], "1 KB · 还有 3 小时");
+});
+
+test("fileAddress：会话 + 绝对路径，盘符冒号保留、中文与空格逐段编码", () => {
+  const { fileAddress } = loadClientModule().__test;
+  assert.equal(
+    fileAddress("s1", "C:\\Users\\autod\\报告 1.pdf"),
+    "dsh-resource://file/session/s1/C:/Users/autod/%E6%8A%A5%E5%91%8A%201.pdf",
+  );
+  // POSIX 绝对路径：开头的空段要留住，否则地址会变成相对路径。
+  assert.equal(fileAddress("s1", "/tmp/a#b.txt"), "dsh-resource://file/session/s1//tmp/a%23b.txt");
+});
+
+test("PreviewButton：HEAD 通过才交给内置预览，失效或缺路径都不打开", async () => {
+  const calls = [];
+  let response = { ok: true, status: 200 };
+  const module = loadClientModule({
+    fetch: async (url, init) => {
+      assert.equal(url, "/deliver/x/0");
+      assert.equal(init.method, "HEAD");
+      return response;
+    },
+  });
+  const { PreviewButton } = module.__test.createComponents({
+    openPreview: (sessionId, file) => calls.push([sessionId, file.absPath]),
+  });
+  const file = { index: 0, name: "a.png", sizeText: "1 KB", url: "/deliver/x/0", absPath: "C:/tmp/a.png" };
+  const button = PreviewButton({ file, sessionId: "s1" }).children[1];
+  assert.equal(button.children[0], "预览");
+
+  await button.props.onClick();
+  assert.deepEqual(calls, [["s1", "C:/tmp/a.png"]]);
+
+  // 撤销/过期：不打开。
+  response = { ok: false, status: 410 };
+  const gone = PreviewButton({ file, sessionId: "s1" });
+  await gone.children[1].props.onClick();
+  assert.equal(calls.length, 1);
+  // 失效后的文案由重渲染给出（假 React 不会自己重渲染，这里直接把状态钉成 gone）。
+  module.__react.useState = () => ["gone", () => {}];
+  const goneTree = PreviewButton({ file, sessionId: "s1" });
+  assert.equal(goneTree.children[0].children[0], "已失效");
+  // 与下载按钮同一条约束：失效态不禁用（焦点要还回来），但告诉读屏「按了没用」。
+  assert.equal(goneTree.children[1].props.disabled, false);
+  assert.equal(goneTree.children[1].props["aria-disabled"], "true");
+
+  // 老记录没有绝对路径：连 HEAD 都不发。
+  const legacy = PreviewButton({ file: { ...file, absPath: "" }, sessionId: "s1" });
+  await legacy.children[1].props.onClick();
+  assert.equal(calls.length, 1);
 });
 
 test("DownloadButton：文案恒为「下载」，提示区是常驻 live region，非检查期不禁用", () => {
@@ -263,13 +329,26 @@ test("readMeta：合法结构读出列表，缺字段或形状不对返回 null"
   const meta = readMeta({
     meta: {
       deliveryId: "abc",
+      sessionId: "s1",
       expiresAt: 1234,
-      files: [{ index: 0, name: "a.txt", size: 3, sizeText: "3 B", url: "/deliver/abc/0" }],
+      files: [
+        {
+          index: 0,
+          name: "a.txt",
+          size: 3,
+          sizeText: "3 B",
+          url: "/deliver/abc/0",
+          absPath: "C:/tmp/a.txt",
+        },
+      ],
     },
   });
   assert.equal(meta.deliveryId, "abc");
+  assert.equal(meta.sessionId, "s1");
   assert.equal(meta.files.length, 1);
   assert.equal(meta.files[0].sizeText, "3 B");
+  // 预览要的原料必须穿过投影，否则卡片上永远没有预览按钮可用。
+  assert.equal(meta.files[0].absPath, "C:/tmp/a.txt");
 
   assert.equal(readMeta({}), null);
   assert.equal(readMeta({ meta: null }), null);
@@ -285,6 +364,9 @@ test("readMeta：老记录缺 sizeText 时给空串而不是崩", () => {
   });
   assert.equal(meta.files[0].sizeText, "");
   assert.equal(meta.files[0].index, 0);
+  // 老记录没有绝对路径：给空串，预览按钮据此不发明地址。
+  assert.equal(meta.files[0].absPath, "");
+  assert.equal(meta.sessionId, "");
   assert.equal(meta.expiresAt, 0);
 });
 
