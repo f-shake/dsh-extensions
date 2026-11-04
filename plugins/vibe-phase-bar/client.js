@@ -15,9 +15,21 @@ window.__ModuleLoader__.load({
 
     /** 轮询间隔。宿主状态只由工具与点击改动，一秒一次足够。 */
     const POLL_MS = 1000;
+    /**
+     * 点「计划」时填进输入框的命令。
+     *
+     * 与在 `/` 菜单里选技能落下的文本完全一致（`dsh-client-ui-skill` 的 onPick 返回
+     * `/${name} `），所以填完之后光标就在末尾，用户接着写构想即可。
+     */
+    const SKILL_COMMAND = '/vibe-coding ';
     /** 阶段四的验证方式。id 与宿主一致，顺序即弹框顺序。 */
     const VERIFY_CHOICES = [
       { id: 'unit', label: '全量单元测试', note: '整套单元测试跑一遍' },
+      {
+        id: 'unit-scope',
+        label: '改动相关单元测试',
+        note: '只跑这次改动涉及模块的单测',
+      },
       { id: 'e2e', label: '端到端验证', note: '按真实路径把流程走通' },
       { id: 'release', label: '发布测试', note: '打包与发布链路' },
     ];
@@ -190,11 +202,14 @@ window.__ModuleLoader__.load({
             void load();
           }
         },
-        /** 没有流程时点按钮：只把阶段一状态建出来，不发消息。 */
-        async open() {
+        /**
+         * 没有流程时点按钮：只把阶段一状态建出来，不发消息。
+         * @param {boolean} [fresh] - 已有流程时也把状态清回阶段一（点「计划」重开用）。
+         */
+        async open(fresh = false) {
           issued += 1;
           try {
-            const body = await request('/vibe-phase/open', { session: sessionId });
+            const body = await request('/vibe-phase/open', { session: sessionId, fresh });
             publish({
               loaded: true,
               state: body?.state ?? null,
@@ -314,6 +329,7 @@ window.__ModuleLoader__.load({
     function chipTitle(phase, state) {
       const name = PHASES[phase - 1].label;
       if (state.pending === phase) return `阶段 ${phase}（${name}）等待你确认`;
+      if (phase === 1) return `阶段 1（计划）· 点击把 ${SKILL_COMMAND.trim()} 填进输入框`;
       if (phase === 2 && state.devMode === 'split' && state.devStep === 'a') {
         return '阶段 2a（开发·前端与设计），点击进入 2b';
       }
@@ -474,11 +490,21 @@ window.__ModuleLoader__.load({
 
     /**
      * 输入框上方的五阶段条，以及点「开发」「验证」时弹出的选项面板。
-     * @param {object} props - 插槽标准属性。
+     *
+     * 阶段一不是确认动作：点它只把 `/vibe-coding ` 填进输入框，并把宿主状态清回阶段一，
+     * 始终不发消息。流程真正的起点是用户补完构想把这条命令发出去，模型随后调 `enter 1`。
+     * @param {object} props - 插槽标准属性（会话 id 与公开的输入动作面）。
      * @returns {object | null} 阶段条。
      */
-    function PhaseBar({ sessionId }) {
+    function PhaseBar({ sessionId, inputActions, useInput }) {
       const { store, snapshot } = usePhaseStore(sessionId);
+      // 订阅草稿：点「计划」时要把已有内容挪到命令后面当构想，所以这里不能只在点击时读。
+      // useInput 是会话级槽位的必备属性；万一宿主没给就记成 null，点「计划」时什么都不做——
+      // 把它当成空草稿，会把用户已经写好、只是没读到的内容整段覆盖掉。
+      const draft =
+        typeof useInput === 'function'
+          ? useInput((value) => (value == null ? '' : value.draft))
+          : null;
       const [confirming, setConfirming] = React.useState(false);
       // 面板是纯本地状态：开着不代表宿主变了，取消就等于什么都没发生。
       const [dialog, setDialog] = React.useState(null);
@@ -573,6 +599,20 @@ window.__ModuleLoader__.load({
         );
       };
 
+      /**
+       * 把 `/vibe-coding ` 填进输入框，一条消息都不发、也不碰阶段状态。
+       *
+       * 草稿为空时只放这条命令；已有文字时把命令放到最前面，原内容顺延成「初步构想」。
+       * 已经以这条命令开头就不动，免得连点两次叠出两行。
+       * 读不到草稿时（宿主没给 useInput）宁可什么都不做：当成空草稿会覆盖用户已写的内容。
+       */
+      const seedSkillCommand = () => {
+        if (inputActions === undefined || draft === null) return;
+        const text = draft;
+        if (text.trimStart().startsWith(SKILL_COMMAND.trimEnd())) return;
+        inputActions.setDraft(text.trim() === '' ? SKILL_COMMAND : `${SKILL_COMMAND}${text}`);
+      };
+
       const submitDev = () => {
         closeDialog();
         onChipClick(store, state, 2, { devSplit });
@@ -588,6 +628,14 @@ window.__ModuleLoader__.load({
       const onChip = (event, item) => {
         chipRef.current = event.currentTarget;
         if (dialog !== null) return;
+        // 阶段一只负责把技能命令填进输入框：发不发消息由用户按发送键决定。
+        // 同时把宿主状态清回阶段一（fresh，同样不发消息）——否则上一轮的验证方式会挂在
+        // 阶段四的悬停说明上，模型挂起的 pending 也会一直闪。重置失败不影响填命令。
+        if (item.n === 1) {
+          void store.open(true);
+          seedSkillCommand();
+          return;
+        }
         // 只有「答案不止一个」的两处拦下来问，其余点击照旧直接确认。
         if (item.n === 2 && state.phase < 2) {
           setDevSplit(false);
@@ -618,7 +666,11 @@ window.__ModuleLoader__.load({
             // 用 aria-current 标当前阶段即可，套 tab 语义反而要求方向键与 tabpanel。
             'aria-current': item.n === state.phase ? 'step' : undefined,
             'aria-label':
-              step === null ? `${item.n} ${item.label}` : `${item.n} ${item.label} 2${step}`,
+              item.n === 1
+                ? `${item.n} ${item.label}（点击把 ${SKILL_COMMAND.trim()} 填入输入框）`
+                : step === null
+                  ? `${item.n} ${item.label}`
+                  : `${item.n} ${item.label} 2${step}`,
             title: chipTitle(item.n, state),
             onClick: (event) => onChip(event, item),
           },

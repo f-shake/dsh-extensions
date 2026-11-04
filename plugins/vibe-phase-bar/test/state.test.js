@@ -181,6 +181,17 @@ test("version 每次真实变更都前进", () => {
   assert.equal(applyRequest(entered, 2, START), entered);
 });
 
+test("重开进入阶段一：上一轮的验证方式与跳过项不跟着走", () => {
+  let state = applyEnter(createState(START), 2, START);
+  state = planConfirm(state, 4, START + 10, 2000, { verify: ["unit", "e2e"] }).state;
+  assert.deepEqual(state.skipped, [3]);
+  assert.deepEqual(state.verify, ["unit", "e2e"]);
+  const restarted = applyEnter(state, 1, START + 20);
+  assert.equal(restarted.phase, 1);
+  assert.deepEqual(restarted.skipped, []);
+  assert.deepEqual(restarted.verify, []);
+});
+
 test("新建状态默认一次性完成、没有验证方式", () => {
   const state = createState(START);
   assert.equal(state.devMode, "single");
@@ -248,6 +259,17 @@ test("点验证选两种方式：状态记住选项，消息带上方式", () =>
   );
 });
 
+test("验证方式可选「改动相关单元测试」：状态记住它，消息用同一个标签", () => {
+  const state = applyEnter(createState(START), 3, START);
+  // planConfirm 不做排序，顺序由 HTTP 层的 normalizeOptions 保证；这里验标签映射。
+  const result = planConfirm(state, 4, START + 10, 2000, { verify: ["unit-scope", "e2e"] });
+  assert.deepEqual(result.state.verify, ["unit-scope", "e2e"]);
+  assert.equal(
+    result.message,
+    "确认进入阶段 4（验证），验证方式：改动相关单元测试、端到端验证。按选定方式执行，不要再问我选哪种。",
+  );
+});
+
 test("跳到阶段四时，跳过项与验证方式写在同一句里", () => {
   const state = applyEnter(createState(START), 2, START);
   const result = planConfirm(state, 4, START + 10, 2000, { verify: ["release"] });
@@ -299,6 +321,11 @@ test("normalizeOptions 接受合法组合并按固定顺序排", () => {
     ok: true,
     options: { verify: ["unit", "e2e"] },
   });
+  // 两种单测粒度都在白名单里，顺序仍由 VERIFY_METHODS 决定。
+  assert.deepEqual(normalizeOptions({ verify: ["release", "unit-scope", "unit"] }), {
+    ok: true,
+    options: { verify: ["unit", "unit-scope", "release"] },
+  });
 });
 
 test("normalizeOptions 拒绝非法组合", () => {
@@ -316,5 +343,6 @@ test("normalizeOptions 拒绝非法组合", () => {
 
 test("verifyLabels 把 id 翻成中文，未知 id 原样保留", () => {
   assert.equal(verifyLabels(["unit", "release"]), "全量单元测试、发布测试");
+  assert.equal(verifyLabels(["unit-scope"]), "改动相关单元测试");
   assert.equal(verifyLabels(["nope"]), "nope");
 });
