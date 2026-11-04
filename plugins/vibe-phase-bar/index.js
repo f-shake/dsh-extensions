@@ -26,11 +26,15 @@ const MIN_PHASE = 1;
 const MAX_PHASE = 5;
 
 /**
- * 阶段四的三种验证方式。顺序即弹框顺序、也是写进消息的顺序。
+ * 阶段四的验证方式。顺序即弹框顺序、也是写进消息的顺序。
  * id 会存进状态并由客户端回显，属于稳定契约：改 id 等于改数据结构。
+ *
+ * `unit` 与 `unit-scope` 是同一维度的两种粒度：全量跑一遍，或只跑这次改动涉及模块的
+ * 单测。两者可以同时勾（那等于全量），不额外拦——勾选的本来只是「跑哪几种」。
  */
 const VERIFY_METHODS = Object.freeze([
   { id: "unit", label: "全量单元测试" },
+  { id: "unit-scope", label: "改动相关单元测试" },
   { id: "e2e", label: "端到端验证" },
   { id: "release", label: "发布测试" },
 ]);
@@ -109,10 +113,13 @@ function commit(state, patch) {
  */
 export function applyEnter(state, phase) {
   const keepCommitFlags = phase === MAX_PHASE;
+  // 进入阶段一就是重开一轮：上一轮的跳过项与验证方式都不该跟着走，
+  // 否则阶段四的悬停说明会一直挂着早已失效的「已选 …」。
+  const restart = phase === MIN_PHASE;
   return commit(state, {
     phase,
     pending: null,
-    skipped: state.skipped.filter((item) => item < phase),
+    skipped: restart ? [] : state.skipped.filter((item) => item < phase),
     precommit: keepCommitFlags ? state.precommit : false,
     authorized: keepCommitFlags ? state.authorized : false,
     precommitAt: keepCommitFlags ? state.precommitAt : 0,
@@ -120,7 +127,7 @@ export function applyEnter(state, phase) {
     // 保留旧值没有意义——能走到这里的 enter(2) 必然不是从 2a 里出来的。
     devMode: "single",
     devStep: null,
-    verify: keepCommitFlags ? [] : state.verify,
+    verify: keepCommitFlags || restart ? [] : state.verify,
   });
 }
 
@@ -569,6 +576,9 @@ export function createHandlers({
         // 已有条目时原样返回：重复点按钮不该把阶段重置回一。
         // 顺手挂上会话当前的 agent，否则这条刚开出来的条点哪儿都是 409。
         const entry = store.ensure(sessionId, lookupAgent?.(sessionId));
+        // fresh：点「计划」重开时用——把状态清回阶段一，同样不发消息。
+        // 保留条目里的 agent 绑定，用户发出命令后模型调 enter(1) 就能直接沿用。
+        if (body.fresh === true) entry.state = createState();
         return send(res, 200, { ok: true, state: publicState(entry.state) });
       }
 

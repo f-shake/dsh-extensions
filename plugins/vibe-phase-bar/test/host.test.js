@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { apply, createHandlers, createStore, createTool, sessionIdOf } from "../index.js";
+import { apply, applyEnter, createHandlers, createStore, createTool, sessionIdOf } from "../index.js";
 
 const START = 1_000_000;
 
@@ -392,6 +392,33 @@ test("open 对已有状态幂等，不会把阶段重置回一", async () => {
   assert.equal(res.body.state.phase, 3);
 });
 
+test("open 带 fresh 把已有状态清回阶段一，同样不发消息", async () => {
+  const store = createStore();
+  const tool = createTool({ store });
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  const { agent, followups } = makeAgent("s1");
+
+  await tool.execute({ action: "enter", phase: 4 }, { agent });
+  // 造出上一轮的残留：跳过项与验证方式。
+  store.get("s1").state = {
+    ...applyEnter(store.get("s1").state, 4, START),
+    skipped: [3],
+    verify: ["unit", "e2e"],
+  };
+  const before = followups.length;
+
+  const res = await call(handler, postReq("/vibe-phase/open", { session: "s1", fresh: true }));
+  assert.equal(res.status, 200);
+  assert.equal(res.body.state.phase, 1);
+  assert.equal(res.body.state.pending, null);
+  assert.deepEqual(res.body.state.verify, []);
+  assert.deepEqual(res.body.state.skipped, []);
+  assert.equal(followups.length, before);
+  // agent 绑定保留：重开之后点阶段二仍能直接发消息。
+  const confirm = await call(handler, postReq("/vibe-phase/confirm", { session: "s1", phase: 2 }));
+  assert.equal(confirm.status, 200);
+});
+
 test("open 缺会话 id 返回 400", async () => {
   const store = createStore();
   const handler = createHandlers({ store, clock: () => START }).handle;
@@ -522,6 +549,26 @@ test("确认时带上验证方式，消息列出方式且状态记住它", async
   assert.equal(res.status, 200);
   assert.deepEqual(res.body.state.verify, ["unit", "e2e"]);
   assert.match(followups[0].content[0].text, /验证方式：全量单元测试、端到端验证/);
+});
+
+test("勾了「改动相关单元测试」：路由接受它，消息也照它的标签写", async () => {
+  const store = createStore();
+  const tool = createTool({ store });
+  const handler = createHandlers({ store, clock: () => START }).handle;
+  const { agent, followups } = makeAgent("s1");
+  await tool.execute({ action: "enter", phase: 3 }, { agent });
+
+  const res = await call(
+    handler,
+    postReq("/vibe-phase/confirm", {
+      session: "s1",
+      phase: 4,
+      options: { verify: ["unit-scope", "e2e"] },
+    }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.state.verify, ["unit-scope", "e2e"]);
+  assert.match(followups[0].content[0].text, /验证方式：改动相关单元测试、端到端验证/);
 });
 
 test("非法的选项组合返回 400，不推进状态也不发消息", async () => {
