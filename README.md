@@ -16,6 +16,7 @@ dsh-extensions/
     ├── mux-deflate/           宿主侧减负：给 /api/remote.mux 的 WebSocket 打开压缩
     ├── deliver/               文件投递：宿主文件变成可下载的卡片，右侧栏带一个投递箱
     ├── vibe-phase-bar/        vibe coding 流程：输入框上方的五阶段条、加号右侧的显隐按钮、阶段二/四的选择弹框、阶段请求工具
+    ├── git-panel/             右侧边栏的 Git 面板：选择子仓库、未提交文件分组与逐文件差异（只读）
     └── session-list-cache/    客户端减负：会话列表先用上次的结果出来，不等网络
 ```
 

@@ -1,0 +1,4 @@
+- insert:
+    - id: git-panel
+      name: '@local/git-panel'
+      config: {}
