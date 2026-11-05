@@ -1,0 +1,3 @@
+interface:
+  display_name: "复核-修复-再复核"
+  short_description: "子 Agent 复核发现问题、主 Agent 判断修复、再复核确认的闭环"

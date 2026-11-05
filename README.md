@@ -6,6 +6,7 @@ DSH（DeepSeek Harness）相关的自研部件，统一放在一个仓库里。
 dsh-extensions/
 ├── dsh-remote-android/        Android 客户端：远程访问 DSH 实例（Kotlin + Compose + WebView）
 ├── dsh-auth/                  DSH 公网访问网关：密码 + TOTP 双因子（Python / FastAPI）
+├── skills/                    vibe coding 系列技能（skill 源文件，同步到 ~/.dsh/skills 生效）
 └── plugins/                   DSH 客户端插件（Cordis bundle）
     ├── mobile-fit/            窄屏适配：弹窗/设置面板不超屏
     ├── header-compact/        窄屏标题行收紧：子智能体/后台任务文案缩短、隐藏手机端无用的「在本地打开」
@@ -73,6 +74,27 @@ node C:\Running\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js plugin --profile aa
 cd plugins\mobile-fit
 pnpm pack
 ```
+
+## skills
+
+`vibe-coding`、`grilling`、`review-and-fix-cycle` 三个技能的源文件，原来在 OneDrive 的
+独立仓库里，现并入本仓库统一版本管理。
+
+**本仓库是「源」，`~/.dsh/skills/` 是「副本」——改这里的文件不会自动生效，必须同步：**
+
+```powershell
+.\scripts\sync-skills.ps1          # 先删后拷 + 哈希校验
+.\scripts\sync-skills.ps1 -Prune   # 顺带删掉副本里仓库已无的技能
+```
+
+脚本不碰 `anydrop`、`docsearch-*`、`notify-mail` 这些不由本仓库管理的技能。
+
+几个约束（来自 DSH 的 skill 发现规则）：
+
+- **目录结构必须是 `skills/<name>/SKILL.md`**，发现深度只有一层，不支持嵌套 `**/SKILL.md`；bundle 内部的 `references/` 随意嵌套
+- 用**复制**而不是符号链接：Node 的 `dirent.isDirectory()` 对符号链接目录返回 `false`，会被静默跳过，skill 直接消失
+- 必须**先删后拷**：直接覆盖会留下上一版已删除的文件
+- DSH 监视 `~/.dsh/skills/`，改完即生效；正文每次加载重读，不必重启
 
 ## 版本管理约定
 
