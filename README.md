@@ -18,10 +18,12 @@ dsh-extensions/
     ├── deliver/               文件投递：宿主文件变成可下载的卡片，右侧栏带一个投递箱
     ├── vibe-phase-bar/        vibe coding 流程：输入框上方的五阶段条、加号右侧的显隐按钮、阶段二/四的选择弹框、阶段请求工具
     ├── git-panel/             右侧边栏的 Git 面板：选择子仓库、未提交文件分组与逐文件差异（只读）
-    └── session-list-cache/    客户端减负：会话列表先用上次的结果出来，不等网络
+    ├── session-list-cache/    客户端减负：会话列表先用上次的结果出来，不等网络
+    └── external/              第三方插件源码（git 子模块，仓库里只有 commit 指针）
+        └── dsh-live-compact/  边做边压：不调模型的尾部小切压缩（MIT，上游 MerkyorLynn/dsh-live-compact）
 ```
 
-三部分是独立的交付物，各有自己的构建方式和部署位置，只是一起做版本管理。
+各部件是独立的交付物，各有自己的构建方式和部署位置，只是一起做版本管理。
 
 ## dsh-remote-android
 
@@ -74,6 +76,29 @@ node C:\Running\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js plugin --profile aa
 cd plugins\mobile-fit
 pnpm pack
 ```
+
+### 第三方插件（plugins/external/）
+
+别人开源的插件放在 `plugins/external/<名>/`，用 **git 子模块**引入：本仓库只记一条 commit
+指针，源码留在上游，不复制、不 fork，对方的 LICENSE 和版权声明原样保留。
+
+```powershell
+# 拉仓库必须带子模块，否则 external/ 下是空目录
+git clone --recurse-submodules <repo>
+
+# 更新到上游新提交，再提交更新后的指针
+git submodule update --remote plugins/external/dsh-live-compact
+```
+
+安装仍然是 profile 的事，与本仓库其他插件一样走 `link:`：
+
+```powershell
+dsh plugin --profile aa add "<上游真实包名>@link:<repo>/plugins/external/<名>"
+```
+
+方式别用反：**只读引用才用子模块**——在子模块里改代码，下次 `update --remote` 就被冲掉。
+真要改，就 fork，或者复制进 `plugins/` 当自己的插件维护。
+零构建的包（根目录直接是 `.js`）检出即可用；TS 写的那种必须先 `pnpm build` 出 `dist/`。
 
 ## skills
 
