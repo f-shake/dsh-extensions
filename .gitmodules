@@ -1,0 +1,3 @@
+[submodule "plugins/external/dsh-live-compact"]
+	path = plugins/external/dsh-live-compact
+	url = https://github.com/MerkyorLynn/dsh-live-compact.git
