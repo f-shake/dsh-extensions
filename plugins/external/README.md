@@ -43,6 +43,21 @@ git commit -m "external: 引入 <owner>/<repo> @ <短 sha>"
 
    包如果声明了 `dsh.bundle.patch`，这条命令成功后会自动把名字追加进
    `dsh.profile.bundles`；没声明只当普通依赖，CLI 会打 warning，等于白装。
+
+   ⚠️ **有 peer 依赖的插件，`link:` 装完仍会加载失败**。`link:` 指向的是子模块的真实路径，
+   Node 从那里往上找 `@deepseek-ai/*` 只会翻到本仓库，找不到（实测报
+   `ERR_MODULE_NOT_FOUND: Cannot find package '@deepseek-ai/dsh-compaction-basic'`）。
+   这类插件要把 peer 一并 link 进 profile，指向 DSH 自己的安装目录：
+
+   ```powershell
+   dsh plugin --profile aa add `
+     "@deepseek-ai/dsh-compaction@link:C:/Running/dsh/node_modules/@deepseek-ai/dsh-compaction" `
+     "@deepseek-ai/dsh-compaction-basic@link:C:/Running/dsh/node_modules/@deepseek-ai/dsh-compaction-basic" `
+     "@deepseek-ai/dsh-llm@link:C:/Running/dsh/node_modules/@deepseek-ai/dsh-llm"
+   ```
+
+   别去 npm 装同名包：上面三个在 registries 上只有 `0.0.1-rc.x` 之类的旧版本，跟运行时
+   （`0.2.1-rc.2`）对不上。
 3. **验证**：宿主侧插件需重启 dsh；客户端插件刷新页面即可。确认
    `dsh.profile.bundles` 里有它、启动日志里没出现 `skippedBundles`。
 
