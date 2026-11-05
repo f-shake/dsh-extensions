@@ -6,11 +6,14 @@
     本仓库是「源」，~/.dsh/skills 是「副本」。改仓库里的文件不会自动生效，
     必须跑一遍本脚本。
 
-    三个坑，脚本已经处理：
+    四个坑，脚本已经处理：
       1. 先删后拷 —— 直接覆盖会把上一版残留的、这次已删除的文件留在副本里；
       2. 拷完逐个校验哈希，不信「应该拷过去了」；
       3. 副本里多出来的旧技能 —— 只删本脚本自己装过、现已从仓库移除的，
-         靠 <Target>\.sync-skills-owned.json 记录，绝不碰别人放的技能。
+         靠 <Target>\.sync-skills-owned.json 记录，绝不碰别人放的技能；
+      4. 覆盖前先备份 —— 副本若比仓库新（改在了 ~\.dsh 侧、没回流仓库），
+         先删后拷会把它抹掉。所以每次覆盖前把旧目录拷到 <Target>\..\skills.bak\<时间戳>\，
+         只留最近 MaxBackups 份。备份目录在 skills\ 外面，不会被当成技能。
 
 .PARAMETER Target
     副本目录。默认取 $env:DSH_HOME\skills，没有就用 ~\.dsh\skills。
@@ -18,14 +21,23 @@
 .PARAMETER Prune
     删掉本脚本曾安装、但仓库里已经没有的技能（按记录文件判断，不会误删外部技能）。
 
+.PARAMETER NoBackup
+    不做覆盖前备份。只有确认「副本一定不比仓库新」时才用。
+
+.PARAMETER MaxBackups
+    保留最近几份备份，默认 5。
+
 .EXAMPLE
     .\scripts\sync-skills.ps1
     .\scripts\sync-skills.ps1 -Prune
+    .\scripts\sync-skills.ps1 -NoBackup
 #>
 [CmdletBinding()]
 param(
     [string] $Target,
-    [switch] $Prune
+    [switch] $Prune,
+    [switch] $NoBackup,
+    [int] $MaxBackups = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +50,20 @@ if (-not $Target) {
     $Target = Join-Path $dshHome 'skills'
 }
 New-Item -ItemType Directory -Force -Path $Target | Out-Null
+
+# 覆盖前的备份：<Target>\..\skills.bak\<时间戳>\<技能名>
+# 放 skills\ 外面，DSH 才不会把它当成技能扫到
+$backupRoot = Join-Path (Split-Path -Parent $Target) 'skills.bak'
+$backupDir = Join-Path $backupRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
+
+function Backup-Skill([string] $Path, [string] $Name) {
+    if ($NoBackup) { return }
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $dest = Join-Path $backupDir $Name
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+    Copy-Item -LiteralPath $Path -Destination $dest -Recurse -Force
+    Write-Host "备份 $Name → $backupDir" -ForegroundColor DarkGray
+}
 
 # 谁装过、装的是什么 —— 只用来判断「哪些是本脚本的」，不参与技能发现
 $marker = Join-Path $Target '.sync-skills-owned.json'
@@ -63,6 +89,7 @@ $failed = @()
 
 foreach ($s in $skills) {
     $dest = Join-Path $Target $s.Name
+    Backup-Skill $dest $s.Name
     if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
     Copy-Item $s.FullName $dest -Recurse -Force
 
@@ -80,6 +107,7 @@ foreach ($name in $dropped) {
     $path = Join-Path $Target $name
     if (-not (Test-Path $path)) { continue }
     if ($Prune) {
+        Backup-Skill $path $name
         Remove-Item $path -Recurse -Force
         Write-Host "删掉 $name（仓库里已移除）" -ForegroundColor Yellow
     } else {
@@ -98,6 +126,24 @@ if ($failed) { throw "校验失败：$($failed -join ', ')" }
 
 if (-not $Prune) { $names = @($names + ($dropped | Where-Object { Test-Path (Join-Path $Target $_) })) }
 ConvertTo-Json -InputObject @($names) -Compress | Set-Content $marker -Encoding utf8
+
+# 备份只留最近 MaxBackups 份；这次没覆盖到东西（全是新装）就别留空目录
+if (-not $NoBackup) {
+    if (Test-Path -LiteralPath $backupDir) {
+        $old = @()
+        if ($MaxBackups -gt 0) {
+            $old = @(Get-ChildItem -LiteralPath $backupRoot -Directory |
+                Sort-Object Name -Descending | Select-Object -Skip $MaxBackups)
+        }
+        foreach ($d in $old) {
+            Remove-Item -LiteralPath $d.FullName -Recurse -Force
+            Write-Host "清掉旧备份 $($d.Name)" -ForegroundColor DarkGray
+        }
+        Write-Host "备份 → $backupDir" -ForegroundColor DarkGray
+    } else {
+        Write-Host "本次没有覆盖任何已有技能，未产生备份" -ForegroundColor DarkGray
+    }
+}
 
 Write-Host "`n同步完成 → $Target" -ForegroundColor Cyan
 Write-Host "DSH 监视该目录，新会话直接生效；已开的会话里正文也是每次加载重读的。" -ForegroundColor DarkGray

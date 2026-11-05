@@ -108,11 +108,16 @@ dsh plugin --profile aa add "<上游真实包名>@link:<repo>/plugins/external/<
 **本仓库是「源」，`~/.dsh/skills/` 是「副本」——改这里的文件不会自动生效，必须同步：**
 
 ```powershell
-.\scripts\sync-skills.ps1          # 先删后拷 + 哈希校验
+.\scripts\sync-skills.ps1          # 覆盖前备份 + 先删后拷 + 哈希校验
 .\scripts\sync-skills.ps1 -Prune   # 顺带删掉副本里仓库已无的技能
+.\scripts\sync-skills.ps1 -NoBackup # 不做备份（确认副本不比仓库新时才用）
 ```
 
 脚本不碰 `anydrop`、`docsearch-*`、`notify-mail` 这些不由本仓库管理的技能。
+
+**覆盖前会先备份**：要把旧目录拷到 `~/.dsh/skills.bak/<时间戳>/<技能名>`，只留最近 5 份
+（`-MaxBackups` 可调）。备份目录在 `skills/` 外面，不会被当成技能扫到。
+这条是为「副本被改得比仓库新」准备的——先删后拷会把那种改动直接抹掉，没有备份就只能去翻会话日志。
 
 几个约束（来自 DSH 的 skill 发现规则）：
 
