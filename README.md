@@ -11,7 +11,7 @@ dsh-extensions/
     ├── header-compact/        窄屏标题行收紧：子智能体/后台任务文案缩短、隐藏手机端无用的「在本地打开」
     ├── session-activity-order/ 侧栏排序：活跃工作区/会话自动置顶
     ├── composer-focus/        输入框交互：点按钮不拉键盘、滑聊天区收键盘、切会话不自动弹键盘
-    ├── background-send/       插话即转后台：用户插话时把前台命令转到后台
+    ├── background-send/       插话即转后台：把前台命令转到后台，结果里说明是插话而非超时
     ├── payload-diet/          宿主侧减负：外置 combo 里的内联图、给静态资源补缓存头、收窄会话首屏窗口
     ├── mux-deflate/           宿主侧减负：给 /api/remote.mux 的 WebSocket 打开压缩
     ├── deliver/               文件投递：宿主文件变成可下载的卡片，右侧栏带一个投递箱

@@ -27,6 +27,18 @@ const MIN_SLICE_MS = 50;
 const MAX_SLICE_MS = 1000;
 
 /**
+ * 工具侧的「前台等待被放手」标记。文案由 pwsh / bash 两个工具写死，
+ * 这里只用来定位那段标记和取出 job id，不参与其他判断。
+ */
+const PROMOTED_PATTERN = /\[still running after [^\]\n]*?; moved to background job ([^\]\n]+)\]/;
+
+/**
+ * 插话释放记录的有效期：过了这段时间还没被对应工具调用取走，就当作没发生过，
+ * 避免长会话里表无限增长，也避免误改同一 job id 的后续结果。
+ */
+const STEERED_TTL_MS = 60_000;
+
+/**
  * 释放的最小等待年龄：任务刚注册时进程可能还没 spawn 出来，此时让工具拿到
  * running 视图会触发它自己的「准备期超时」分支并杀掉命令。等一小会儿再唤醒，
  * 让 spawn 有时间完成。只是缩小概率，不能保证（spawn 更慢时仍会命中）。
@@ -71,6 +83,63 @@ export function isUserSteer(event) {
 }
 
 /**
+ * 替换用的说明句：说清是用户插话让这次等待提前结束，而不是超时。
+ * @param {string} jobId - 被转到后台的 job id。
+ * @returns {string} 替换标记。
+ */
+function steeredMarker(jobId) {
+  return `[the user sent a message, so this call stopped waiting; the command moved to background job ${jobId} and is still running — this is not a timeout]`;
+}
+
+/**
+ * 把工具写的「等到了超时才转到后台」标记换成符合事实的说法。
+ *
+ * 工具侧无法区分「等满了超时」与「等待被提前放手」，两者走同一个 promoted 分支，
+ * 文案固定写成 `[still running after {timeoutMs}ms; …]`，模型会误以为命令超时了。
+ * 这里只在释放记录命中时改写；没命中就原样返回，工具以后换了文案也不会改坏结果。
+ *
+ * 逐处替换而不是只换第一处：被转后台的命令可能在输出里带上同格式的文字（读日志、读本文档），
+ * 只认第一处会漏掉真正的标记，而真正的标记总在输出之后。
+ * @param {unknown} text - 工具结果里的一段文本。
+ * @param {(jobId: string) => boolean} isSteered - 该 job 是否由本次插话释放，调用即消费。
+ * @returns {unknown} 改写后的文本；不需要改写时返回入参本身。
+ */
+export function relabelPromoted(text, isSteered) {
+  if (typeof text !== "string" || typeof isSteered !== "function") return text;
+  const pattern = new RegExp(PROMOTED_PATTERN.source, "g");
+  let out = "";
+  let cursor = 0;
+  let changed = false;
+  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
+    if (!isSteered(match[1])) continue;
+    out += text.slice(cursor, match.index) + steeredMarker(match[1]);
+    cursor = match.index + match[0].length;
+    changed = true;
+  }
+  return changed ? out + text.slice(cursor) : text;
+}
+
+/**
+ * 按块改写工具结果内容：只碰文本块，其他块原样保留；没有改动时返回原数组，
+ * 让上层可以靠引用相等判断是否需要替换。
+ * @param {unknown} content - 工具结果的内容块数组。
+ * @param {(jobId: string) => boolean} isSteered - 释放记录的判定函数。
+ * @returns {unknown} 可能被替换的内容数组。
+ */
+export function relabelContent(content, isSteered) {
+  if (!Array.isArray(content) || typeof isSteered !== "function") return content;
+  let changed = false;
+  const next = content.map((block) => {
+    if (block === null || typeof block !== "object" || block.type !== "text" || typeof block.text !== "string") return block;
+    const text = relabelPromoted(block.text, isSteered);
+    if (text === block.text) return block;
+    changed = true;
+    return { ...block, text };
+  });
+  return changed ? next : content;
+}
+
+/**
  * 包装一个 job 注册表的 wait，使「有等待者的任务」可以在不杀进程的前提下被提前放手。
  *
  * 语义边界：除了新增的 release，四条出口与原来的 wait 一致——结算返回终态视图、
@@ -80,13 +149,15 @@ export function isUserSteer(event) {
  * @param {string[]} [options.kinds] - 允许释放的任务类型。
  * @param {number} [options.sliceMs] - 切片长度。
  * @param {number} [options.preparationGraceMs] - 释放前的最小等待年龄。
- * @returns {{ install: () => void, release: (owner?: string) => number, dispose: () => void, waiterIds: () => string[] }} 安装、释放、卸载与诊断入口。
+ * @param {() => number} [options.now] - 记录时间戳用的时钟；切片计时仍用真实时间，因为那量的是实际等待。
+ * @returns {{ install: () => void, release: (owner?: string) => number, consumeSteered: (jobId: unknown, owner?: string) => boolean, dispose: () => void, waiterIds: () => string[] }} 安装、释放、改写判定、卸载与诊断入口。
  */
 export function createWaitTap({
   jobs,
   kinds = DEFAULT_KINDS,
   sliceMs = DEFAULT_SLICE_MS,
   preparationGraceMs = PREPARATION_GRACE_MS,
+  now = Date.now,
 } = {}) {
   if (jobs === null || typeof jobs !== "object") throw new Error("background-send：缺少 jobs 服务");
   const original = jobs.wait;
@@ -94,6 +165,8 @@ export function createWaitTap({
 
   const allowed = new Set(kinds);
   const waiters = new Map();
+  /** 最近因为插话被放手的 job：job id → { owner, at }，供结果改写核对。 */
+  const steered = new Map();
   const graceTimers = new Set();
   const ownsWait = Object.prototype.hasOwnProperty.call(jobs, "wait");
   let installed = false;
@@ -123,7 +196,7 @@ export function createWaitTap({
       owner: caller === undefined || caller === null ? undefined : String(caller),
       kind: current.kind,
       release,
-      startedAt: Date.now(),
+      startedAt: now(),
     };
     waiters.set(key, record);
     try {
@@ -170,10 +243,14 @@ export function createWaitTap({
       if (owner === undefined || owner === null) return 0;
       const target = String(owner);
       const released = [];
+      const at = now();
+      for (const [key, record] of [...steered]) {
+        if (at - record.at > STEERED_TTL_MS) steered.delete(key);
+      }
       for (const [key, record] of [...waiters]) {
         if (record.owner !== target) continue;
         if (!allowed.has(record.kind)) continue;
-        const age = Date.now() - record.startedAt;
+        const age = at - record.startedAt;
         if (age < preparationGraceMs) {
           // 进程可能还在准备中：稍后再唤醒，避免工具走「准备期超时」把命令杀掉。
           // 定时器必须记下来：宽限期内插件被卸载时，dispose 要能撤掉它，否则会在卸载后
@@ -186,11 +263,33 @@ export function createWaitTap({
         } else {
           record.release();
         }
+        // 记下这次放手，供工具结果改写核对：只有真的被插话放手的等待才改写文案。
+        steered.set(key, { owner: target, at });
         released.push(key);
       }
       // 立刻从表里摘除：释放是幂等的，同一会话的第二次插话不该再算一遍。
       for (const key of released) waiters.delete(key);
       return released.length;
+    },
+    /**
+     * 判定某个 job 是否由插话释放，并把这条记录消费掉（一次性）。
+     * @param {unknown} jobId - 工具结果里写出的 job id。
+     * @param {string} [owner] - 读取方的会话 id。
+     * @returns {boolean} 是否由插话释放。
+     */
+    consumeSteered(jobId, owner) {
+      if (jobId === undefined || jobId === null) return false;
+      const key = String(jobId);
+      const record = steered.get(key);
+      if (record === undefined) return false;
+      if (now() - record.at > STEERED_TTL_MS) {
+        steered.delete(key);
+        return false;
+      }
+      if (owner === undefined || owner === null) return false;
+      if (record.owner !== String(owner)) return false;
+      steered.delete(key);
+      return true;
     },
     dispose() {
       if (!installed) return;
@@ -198,6 +297,7 @@ export function createWaitTap({
       else delete jobs.wait;
       installed = false;
       waiters.clear();
+      steered.clear();
       for (const timer of graceTimers) clearTimeout(timer);
       graceTimers.clear();
     },
@@ -236,5 +336,24 @@ export function apply(ctx, rawConfig) {
       if (released > 0) ctx.logger?.info?.(`background-send：插话转后台 ${released} 个任务`);
     });
     scope.effect(() => stop, "background-send: steer watcher");
+    const allowed = new Set(config.kinds);
+    /**
+     * 改写那段固定文案。必须挂在 tools/post-execute 上而不是 tools/execute：
+     * 后者返回的结果会被注册表按工具返回值重新渲染（normalizeDispatchResult），
+     * 改写会丢；post-execute 的 {kind:"accept", content} 是注册表认可的替换出口。
+     * 工具分不清「超时」和「插话放手」，只有本插件知道自己放走过哪条等待。
+     */
+    const stopPost = ctx.on("tools/post-execute", async (exec, result, next) => {
+      const decision = await next();
+      if (exec === null || typeof exec !== "object" || !allowed.has(exec.name)) return decision;
+      if (result === null || typeof result !== "object" || result.isError === true) return decision;
+      if (decision === null || typeof decision !== "object" || decision.kind !== "accept") return decision;
+      if (decision.value !== undefined) return decision;
+      const content = decision.content !== undefined ? decision.content : result.content;
+      const relabeled = relabelContent(content, (jobId) => tap.consumeSteered(jobId, exec.agent?.id));
+      return relabeled === content ? decision : { ...decision, content: relabeled };
+    });
+    scope.effect(() => stopPost, "background-send: promoted relabel");
   });
 }
+
