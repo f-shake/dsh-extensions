@@ -210,6 +210,13 @@ window.__ModuleLoader__.load({
         'color:var(--dsw-alias-label-tertiary,#8a8f98)}',
         '.dlv-link:hover{text-decoration:underline;color:var(--dsw-alias-label-primary,#f9fafb)}',
         '.dlv-link[data-warn]{color:var(--dsw-alias-state-error-primary,#e05b5b)}',
+        // 回合末尾的紧凑下载条：文件名一行 + 下载按钮。与官方的交付卡并排时不抢视觉，
+        // 也不会把「同一个文件」画成两张卡片。
+        '.dlv-tail{display:flex;flex-direction:column;gap:6px;max-width:100%}',
+        '.dlv-bar{display:flex;align-items:center;gap:8px;min-width:0;padding:5px 10px;border-radius:9px;',
+        'border:1px solid var(--dsw-alias-border-l2,#ffffff14);background:var(--dsw-specific-input-major,transparent)}',
+        '.dlv-bar-name{flex:1 1 auto;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.dlv-bar-meta{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
         '.dlv-err{margin:0;white-space:pre-wrap;word-break:break-word;',
         'color:var(--dsw-alias-state-error-primary,#e05b5b);font-size:11px}',
         '.dlv-box{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;padding:10px;',
@@ -227,7 +234,7 @@ window.__ModuleLoader__.load({
     /**
      * 组件工厂。组件本身只用传进来的 React，不直接碰 DOM。
      * @param {{ openPreview?: (sessionId: string, file: object) => void }} deps - 预览入口（由宿主侧注入，测试里可替换）。
-     * @returns {{ DeliverRow: Function, BoxBody: Function, TurnTailCard: Function, FileRow: Function, FileTile: Function, DownloadButton: Function }} 组件。
+     * @returns {{ DeliverRow: Function, DownloadBar: Function, BoxBody: Function, TurnTailCard: Function, FileRow: Function, FileTile: Function, DownloadButton: Function, PreviewButton: Function }} 组件。
      */
     function createComponents(deps = {}) {
       const openPreview = typeof deps.openPreview === 'function' ? deps.openPreview : null;
@@ -408,6 +415,29 @@ window.__ModuleLoader__.load({
                   : null,
                 h(DownloadButton, { url: file.url }),
               ),
+        );
+      }
+
+      /**
+       * 回合末尾的紧凑下载条。
+       *
+       * 只保留「下载」这一个动作，不再画文件缩略块、预览按钮和卡片外框：
+       * 预览与打开已由官方的交付卡和右侧栏承担，这里再画一遍就会和官方卡片
+       * 并排成两三张同款卡片（0.2.2 起 present 与 deliver 常见于同一轮）。
+       * @param {{ file: object, extra?: string }} props - 文件与附加说明。
+       * @returns {object} 元素。
+       */
+      function DownloadBar({ file, extra }) {
+        return h(
+          'div',
+          { className: 'dlv-bar' },
+          h('span', { className: 'dlv-bar-name', title: file.name }, file.name),
+          h(
+            'span',
+            { className: 'dlv-bar-meta' },
+            extra === undefined || extra === '' ? file.sizeText : `${file.sizeText} · ${extra}`,
+          ),
+          h(DownloadButton, { url: file.url }),
         );
       }
 
@@ -674,10 +704,9 @@ window.__ModuleLoader__.load({
           const files = Array.isArray(delivery.files) ? delivery.files : [];
           for (const file of files) {
             rows.push(
-              h(FileRow, {
+              h(DownloadBar, {
                 key: `${delivery.id}-${file.index}`,
                 file,
-                sessionId: delivery.sessionId,
                 extra: remainingText(delivery.expiresAt, now),
               }),
             );
@@ -686,12 +715,12 @@ window.__ModuleLoader__.load({
 
         return h(
           'div',
-          { 'data-deliver': '', className: 'dlv-card' },
+          { 'data-deliver': '', className: 'dlv-tail' },
           rows,
         );
       }
 
-      return { DeliverRow, BoxBody, TurnTailCard, FileRow, FileTile, DownloadButton, PreviewButton };
+      return { DeliverRow, DownloadBar, BoxBody, TurnTailCard, FileRow, FileTile, DownloadButton, PreviewButton };
     }
 
     return {

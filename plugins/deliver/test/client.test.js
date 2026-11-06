@@ -138,9 +138,12 @@ test("客户端 apply：注册工具视图与投递箱页类型，样式只插�
   assert.equal(registered.length, 3);
   for (const component of registered) assert.equal(typeof component, "function");
 
-  // 样式内容也要有约束：删掉某条关键规则（色块 / 行 / 按钮）不会在别的断言里暴露。
+  // 样式内容也要有约束：删掉某条关键规则（色块 / 行 / 按钮 / 回合末尾的下载条）
+  // 不会在别的断言里暴露。
+  // 容器规则要连 `{` 一起断言：只写 `.dlv-bar` 的话 `.dlv-bar-name` 也能让它通过，
+  // 删掉基础规则（边框/背景/padding）测试仍然全绿。
   const css = module.__appended[0].textContent;
-  for (const rule of [".dlv-card", ".dlv-row", ".dlv-tile", ".dlv-btn", ".dlv-flag"]) {
+  for (const rule of [".dlv-card", ".dlv-row", ".dlv-tile", ".dlv-btn", ".dlv-flag", ".dlv-tail{", ".dlv-bar{"]) {
     assert.ok(css.includes(rule), `样式里缺少 ${rule}`);
   }
 
@@ -148,6 +151,27 @@ test("客户端 apply：注册工具视图与投递箱页类型，样式只插�
   assert.equal(module.__appended.length, 1);
   module.apply(ctx);
   assert.equal(module.__appended.length, 1);
+});
+
+test("DownloadBar：单行只留文件名、说明与下载按钮", () => {
+  const { DownloadBar, DownloadButton, PreviewButton } = loadClientModule().__test.createComponents();
+  const file = { index: 0, name: "周报.pdf", sizeText: "2 MB", url: "/deliver/x/0" };
+
+  const tree = DownloadBar({ file, extra: "还有 11 小时" });
+  assert.equal(tree.props.className, "dlv-bar");
+  const [name, meta, button] = tree.children;
+  assert.equal(name.props.className, "dlv-bar-name");
+  assert.equal(name.children[0], "周报.pdf");
+  assert.equal(meta.props.className, "dlv-bar-meta");
+  assert.equal(meta.children[0], "2 MB · 还有 11 小时");
+  assert.equal(button.type, DownloadButton);
+  // 回合末尾不再有预览按钮：预览/打开交给官方交付卡与右侧栏。
+  assert.equal(tree.children.some((child) => child.type === PreviewButton), false);
+
+  // extra 为空或缺失时退回 sizeText，不留「2 MB · 」这种尾巴。
+  for (const extra of [undefined, ""]) {
+    assert.equal(DownloadBar({ file, extra }).children[1].children[0], "2 MB");
+  }
 });
 
 test("FileRow：预览与下载并排，disabled 时两个都不给", () => {
