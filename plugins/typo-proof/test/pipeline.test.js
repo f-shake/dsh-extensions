@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { createCache } from "../lib/cache.js";
 import { mapLimit, runCheck } from "../lib/pipeline.js";
 import { readZip } from "../lib/zip.js";
-import { createJobStore } from "../index.js";
+import { createJobStore, normalizeConfig, panelState } from "../index.js";
 import { miniDocx } from "./fixtures/mini-docx.js";
 
 /**
@@ -246,5 +246,34 @@ test("pipeline：中断后状态落到 error，不抛未处理拒绝", async () 
   });
   jobs.stop();
   await assert.rejects(() => job.promise);
-  assert.equal(job.status, "error");
+  // 主动停止不是失败：状态记 stopped，面板那边会映射成 idle。
+  assert.equal(job.status, "stopped");
+});
+
+test("pipeline：停止要报「已中断」，不能报成连不上模型", async () => {
+  const { file, cache } = await fixture();
+  const jobs = createJobStore();
+  // 模型调用会一直挂着，直到被 abort 打断——正是用户点停止时的样子。
+  const hanging = {
+    async complete({ signal }) {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 5000);
+        signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new Error("模型调用被中断"));
+        });
+      });
+      return "随便";
+    },
+  };
+  const job = jobs.start({ file, llm: hanging, cache, minHanzi: 8, samples: 3, concurrency: 1, reviewConcurrency: 1, models: { local: "m", review: "r" } });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  jobs.stop();
+  await assert.rejects(() => job.promise, /已中断/);
+  assert.equal(job.status, "stopped", "主动停止不是错误");
+  assert.equal(job.stopped, true);
+  const state = panelState({ job, config: normalizeConfig({}) });
+  assert.equal(state.status, "idle", "面板要回到空闲态");
+  assert.equal(state.note, "已停止");
+  assert.equal(state.error, "");
 });

@@ -6,12 +6,15 @@
  */
 
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
+import { homedir } from "node:os";
+import { readdir, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { createCache } from "./lib/cache.js";
 import { PROMPT_VERSION } from "./lib/prompts.js";
 import { applySuggestions, runCheck } from "./lib/pipeline.js";
+import { readSettings, writeSettings } from "./lib/settings.js";
 
 export const name = "typo-proof";
 export const inject = ["tools"];
@@ -31,7 +34,6 @@ export function normalizeConfig(raw) {
   const source = raw !== null && typeof raw === "object" ? raw : {};
   const number = (value, fallback, min) => (Number.isFinite(Number(value)) && Number(value) >= min ? Number(value) : fallback);
   return {
-    demo: source.demo === true,
     file: typeof source.file === "string" ? source.file : "",
     localProvider: typeof source.localProvider === "string" ? source.localProvider : "",
     localModel: typeof source.localModel === "string" ? source.localModel : "",
@@ -129,6 +131,10 @@ export function createJobStore() {
   let sequence = 0;
 
   function start(task) {
+    // 互斥必须在同步段判：写在路由里的话，「守卫 → await → start」之间能挤进第二个请求。
+    if (current !== null && current.status === "running") {
+      throw Object.assign(new Error("已经有一个检查在跑"), { code: "busy" });
+    }
     sequence += 1;
     const controller = new AbortController();
     const job = {
@@ -190,11 +196,20 @@ export function createJobStore() {
         job.status = "done";
         job.phase = "done";
         job.result = result;
+        // 只留最近 5 个：够覆盖「对话里翻回上一轮点下载」，又不会一直占内存。
+        finished.set(job.id, job);
+        while (finished.size > 5) finished.delete(finished.keys().next().value);
         return result;
       })
       .catch((error) => {
-        job.status = "error";
-        job.error = String(error?.message ?? error);
+        // 用户主动停止：状态记成 stopped，面板回到空闲而不是弹一个红错误。
+        if (job.stopped === true || error?.code === "aborted") {
+          job.status = "stopped";
+          job.error = "";
+        } else {
+          job.status = "error";
+          job.error = String(error?.message ?? error);
+        }
         throw error;
       });
 
@@ -206,12 +221,19 @@ export function createJobStore() {
     return job;
   }
 
+  /** 最近完成的任务：对话里的下载链接指向的是「那一次」，不能只认当前任务。 */
+  const finished = new Map();
+
   return {
     start,
     current: () => current,
-    byId: (id) => (current !== null && current.id === id ? current : null),
+    byId: (id) => {
+      if (current !== null && current.id === id) return current;
+      return finished.get(id) ?? null;
+    },
     stop() {
       if (current === null) return false;
+      current.stopped = true;
       current.controller.abort();
       current.paused = false;
       current.resume?.();
@@ -243,19 +265,20 @@ export function panelState(input) {
   const base = {
     status: "idle",
     file: config.file === "" ? "" : basename(config.file),
+    filePath: config.file,
     dir: config.file === "" ? "" : dirname(config.file),
     segments: 0,
     hanzi: 0,
     localModel,
     reviewModel,
     minHanzi: config.minHanzi,
+    samples: config.samples,
     progress: {},
     items: [],
     counts: { candidates: 0, confirmed: 0, disputed: 0, rejected: 0 },
     error: "",
     note: "",
     downloadUrl: "",
-    demo: config.demo,
   };
   if (job === null) return base;
 
@@ -264,8 +287,9 @@ export function panelState(input) {
   const counts = job.result?.counts ?? null;
   return {
     ...base,
-    status: job.status === "error" ? "error" : job.status === "done" ? "done" : "running",
+    status: job.status === "error" ? "error" : job.status === "done" ? "done" : job.status === "stopped" ? "idle" : "running",
     file: basename(job.file),
+    filePath: job.file,
     dir: dirname(job.file),
     segments: progress.paragraphs ?? 0,
     hanzi: progress.hanzi ?? 0,
@@ -284,7 +308,7 @@ export function panelState(input) {
         rejected: items.filter((item) => item.state === "rejected").length,
       },
     error: job.error ?? "",
-    note: job.paused ? "已暂停" : "",
+    note: job.status === "stopped" ? "已停止" : job.paused ? "已暂停" : "",
     downloadUrl: job.status === "done" && job.result?.copyPath !== "" ? `${ROUTE_PREFIX}/download?job=${encodeURIComponent(job.id)}` : "",
     csvUrl: job.status === "done" && job.result?.csvPath !== "" ? `${ROUTE_PREFIX}/csv?job=${encodeURIComponent(job.id)}` : "",
   };
@@ -315,12 +339,53 @@ export function sameOrigin(req) {
 }
 
 /**
+ * 列一个目录：子目录 + 该层的 .docx。
+ *
+ * 只给文件选择框用。为什么只列 .docx：插件只吃这一种文件，把 .txt / .xlsx 也列出来
+ * 只会让人点错一次再被后端拒掉。隐藏文件（点开头）一律不列。
+ * @param {string} dir - 目录绝对路径。
+ * @returns {Promise<{ dir: string, parent: string, dirs: object[], files: object[], truncated: boolean }>} 目录内容。
+ */
+export async function listDirectory(dir) {
+  const target = resolve(String(dir));
+  const entries = await readdir(target, { withFileTypes: true }).catch((error) => {
+    throw new Error(`读不了这个目录：${String(error?.message ?? error)}`);
+  });
+  const dirs = [];
+  const files = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith(".")) continue;
+    if (entry.isDirectory()) {
+      dirs.push({ name: entry.name, path: join(target, entry.name) });
+      continue;
+    }
+    if (entry.isFile() && /\.docx$/i.test(entry.name)) {
+      const info = await stat(join(target, entry.name)).catch(() => null);
+      files.push({ name: entry.name, path: join(target, entry.name), size: info === null ? 0 : info.size });
+    }
+  }
+  const byName = (left, right) => left.name.localeCompare(right.name, "zh-CN");
+  dirs.sort(byName);
+  files.sort(byName);
+  const limit = 200;
+  return {
+    dir: target,
+    parent: dirname(target),
+    dirs: dirs.slice(0, limit),
+    files: files.slice(0, limit),
+    truncated: dirs.length > limit || files.length > limit,
+  };
+}
+
+/**
  * 构造路由处理器。
- * @param {{ jobs: object, config: object, start: (models: object) => object }} deps - 依赖。
+ * @param {{ jobs: object, configFor: () => Promise<object>, start: (options: object) => Promise<object>, saveSettings?: (patch: object) => Promise<object>, providers?: () => Promise<object[]> }} deps - 依赖。
  * @returns {(req: object, res: object) => Promise<void>} 处理器。
  */
 export function createHandlers(deps) {
-  const { jobs, config, start } = deps;
+  const { jobs, configFor, start } = deps;
+  const saveSettings = typeof deps.saveSettings === "function" ? deps.saveSettings : null;
+  const providers = typeof deps.providers === "function" ? deps.providers : null;
 
   function sendJson(res, status, payload) {
     const body = JSON.stringify(payload);
@@ -346,9 +411,62 @@ export function createHandlers(deps) {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname.slice(ROUTE_PREFIX.length) || "/";
     const method = (req.method ?? "GET").toUpperCase();
+    // 每次请求都重新读一遍配置：面板里刚改的值要立刻生效，不必等重启。
+    const config = await configFor();
 
     if (path === "/status" && method === "GET") {
       return sendJson(res, 200, panelState({ job: jobs.current(), config }));
+    }
+
+    if (path === "/config" && method === "GET") {
+      return sendJson(res, 200, {
+        ok: true,
+        config: {
+          file: config.file,
+          localProvider: config.localProvider,
+          localModel: config.localModel,
+          reviewProvider: config.reviewProvider,
+          reviewModel: config.reviewModel,
+          minHanzi: config.minHanzi,
+    samples: config.samples,
+          samples: config.samples,
+          concurrency: config.concurrency,
+        },
+        settingsPath: config.settingsPath,
+      });
+    }
+
+    if (path === "/config" && method === "POST") {
+      if (saveSettings === null) return sendJson(res, 501, { ok: false, error: "这个版本不支持在面板里改设置" });
+      const body = await readBody(req);
+      try {
+        const saved = await saveSettings(body);
+        if (saved.ok !== true) return sendJson(res, 400, { ok: false, error: saved.errors.join("；") });
+        const next = await configFor();
+        return sendJson(res, 200, { ok: true, config: next });
+      } catch (error) {
+        return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) });
+      }
+    }
+
+    if (path === "/providers" && method === "GET") {
+      if (providers === null) return sendJson(res, 200, { ok: true, providers: [] });
+      try {
+        return sendJson(res, 200, { ok: true, providers: await providers() });
+      } catch (error) {
+        return sendJson(res, 200, { ok: true, providers: [], error: String(error?.message ?? error) });
+      }
+    }
+
+    if (path === "/files" && method === "GET") {
+      const requested = url.searchParams.get("dir");
+      // 起点：配置里的文件所在目录；没有就落到用户主目录——dsh 的工作目录跟日记无关。
+      const fallback = config.file === "" ? homedir() : dirname(resolve(config.file));
+      try {
+        return sendJson(res, 200, { ok: true, ...(await listDirectory(requested === null || requested === "" ? fallback : requested)) });
+      } catch (error) {
+        return sendJson(res, 400, { ok: false, error: String(error?.message ?? error) });
+      }
     }
 
     if (path === "/action" && method === "POST") {
@@ -359,10 +477,11 @@ export function createHandlers(deps) {
         }
         try {
           // start 是 async 的（要先校验配置），必须等它，否则拿到的是 Promise 不是任务。
-          const job = await start({});
+          const job = await start({ file: typeof body.file === "string" ? body.file : "" });
           return sendJson(res, 200, { ok: true, jobId: job.id });
         } catch (error) {
-          return sendJson(res, 400, { ok: false, error: String(error?.message ?? error) });
+          const status = error?.code === "busy" ? 409 : 400;
+          return sendJson(res, status, { ok: false, error: String(error?.message ?? error) });
         }
       }
       if (body.action === "pause") return sendJson(res, 200, { ok: jobs.pause() });
@@ -387,7 +506,12 @@ export function createHandlers(deps) {
         "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(basename(source))}`,
         "cache-control": "no-store",
       });
-      createReadStream(source).pipe(res);
+      try {
+        await pipeline(createReadStream(source), res);
+      } catch {
+        // 流已经开始了就没法再发 JSON；直接把连接掐掉，别让宿主收到未处理的 error 事件。
+        res.destroy();
+      }
       return undefined;
     }
 
@@ -396,16 +520,48 @@ export function createHandlers(deps) {
 }
 
 /**
+ * 合并三处来源的配置：Loader 行（默认值）→ 面板里存的值（覆盖）。
+ * @param {object} loaderConfig - Loader 行的原始配置。
+ * @param {object} saved - 面板里存下来的值。
+ * @returns {object} 归一化后的配置。
+ */
+export function mergeConfig(loaderConfig, saved) {
+  // 面板保存的**空串**一律当成「这项没改过」，不能盖掉 Loader 里的默认值。
+  // 曾经就是因为表单把空文件路径写进 settings.json，配置里的 docx 被静默清空。
+  // 例外：复核 provider / 模型留空是有意义的（= 不做云端复核），所以让它生效。
+  const patch = { ...(saved ?? {}) };
+  for (const key of ["file", "localProvider", "localModel"]) {
+    if (patch[key] === "") delete patch[key];
+  }
+  return normalizeConfig({ ...(loaderConfig ?? {}), ...patch });
+}
+
+/**
  * 插件入口。
  * @param {object} ctx - Cordis 上下文。
  * @param {unknown} rawConfig - Loader 行配置。
  */
 export function apply(ctx, rawConfig) {
-  const config = normalizeConfig(rawConfig);
+  const loaderConfig = rawConfig !== null && typeof rawConfig === "object" ? rawConfig : {};
+  // 面板里改的值存在用户目录下，不往仓库或 profile 里写。
+  const settingsPath =
+    typeof loaderConfig.settingsPath === "string" && loaderConfig.settingsPath !== ""
+      ? loaderConfig.settingsPath
+      : join(homedir(), ".dsh", "typo-proof", "settings.json");
 
-  const resolveFile = (input) => {
+  /**
+   * 当前生效的配置：面板设置 > Loader 配置 > 默认值。
+   * 每次调用都重新读盘，所以面板里保存完立刻生效，不必重启。
+   * @returns {Promise<object>} 归一化后的配置。
+   */
+  const configFor = async () => {
+    const saved = await readSettings(settingsPath);
+    return { ...mergeConfig(loaderConfig, saved), settingsPath };
+  };
+
+  const resolveFile = (input, config) => {
     const raw = typeof input === "string" && input !== "" ? input : config.file;
-    if (raw === "") throw new Error("还没有指定要检查的 docx：请在插件配置里设 file，或调用工具时传 file");
+    if (raw === "") throw new Error("还没有指定要检查的 docx：请在面板的设置里填文件路径，或调用工具时传 file");
     return isAbsolute(raw) ? resolve(raw) : resolve(process.cwd(), raw);
   };
 
@@ -423,7 +579,7 @@ export function apply(ctx, rawConfig) {
     },
   });
 
-  const cacheFor = (file) => {
+  const cacheFor = (file, config) => {
     const dir = config.cacheDir === "" ? join(dirname(file), ".typo-proof-cache") : config.cacheDir;
     return createCache({ dir });
   };
@@ -431,11 +587,12 @@ export function apply(ctx, rawConfig) {
   const jobs = createJobStore();
 
   const start = async (options) => {
-    const file = resolveFile(options.file);
+    const config = await configFor();
+    const file = resolveFile(options.file, config);
     if (config.localModel === "") {
       // 报错时把模型栏里现有的都列出来：不然用户只知道「没配」，不知道该填什么。
       const hint = await describeProviders(ctx);
-      throw new Error(`还没有配置本地模型：请在插件配置里填 localProvider / localModel。模型栏里现在有：${hint}`);
+      throw new Error(`还没有配置本地模型：请在面板设置里填 provider 与模型。模型栏里现在有：${hint}`);
     }
     const localClient = makeClient({ provider: config.localProvider, model: config.localModel });
     // 复核模型单独一个客户端；没配就退回本地那个（等于没有云端复核，报告里如实记着）。
@@ -445,14 +602,19 @@ export function apply(ctx, rawConfig) {
       file,
       llm: localClient,
       reviewLlm: reviewClient,
-      cache: cacheFor(file),
+      cache: cacheFor(file, config),
       minHanzi: Number.isFinite(Number(options.minHanzi)) ? Number(options.minHanzi) : config.minHanzi,
       samples: config.samples,
       concurrency: config.concurrency,
       reviewConcurrency: config.reviewConcurrency,
-      models: { local: `${config.localProvider}/${config.localModel}`, review: `${config.reviewProvider}/${config.reviewModel}` },
+      models: {
+        local: `${config.localProvider}/${config.localModel}`,
+        review: config.reviewModel === "" ? "（未配置，用本地模型复核）" : `${config.reviewProvider}/${config.reviewModel}`,
+      },
     });
   };
+
+  const saveSettings = async (patch) => writeSettings(settingsPath, patch);
 
   ctx.effect(
     () =>
@@ -539,11 +701,48 @@ export function apply(ctx, rawConfig) {
         scope.webServer.register({
           kind: "prefix",
           path: ROUTE_PREFIX,
-          handler: createHandlers({ jobs, config, start }),
+          handler: createHandlers({ jobs, configFor, start, saveSettings, providers: () => listProviders(ctx) }),
         }),
       "typo-proof: routes",
     );
   });
+}
+
+/**
+ * 模型栏里现成的 provider 与模型，给面板的下拉提示用。
+ * @param {object} ctx - Cordis 上下文。
+ * @returns {Promise<Array<{ id: string, models: string[] }>>} 结构化列表；拿不到时给空数组。
+ */
+export async function listProviders(ctx) {
+  try {
+    const llm = typeof ctx.get === "function" ? ctx.get("llm") : ctx.llm;
+    if (llm === null || llm === undefined || typeof llm.listProviders !== "function") return [];
+    const providers = await llm.listProviders();
+    if (!Array.isArray(providers)) return [];
+
+    const listed = [];
+    for (const provider of providers) {
+      const id = String(provider?.id ?? provider?.name ?? "");
+      if (id === "") continue;
+      // 宿主的 listProviders() 只给 { id, name }——模型必须按 provider 另查，
+      // 拿 provider.models 会永远是空数组（模型下拉空着的那个坑）。
+      let models = [];
+      if (typeof llm.listModels === "function") {
+        const found = await Promise.resolve(llm.listModels(id)).catch(() => []);
+        models = (Array.isArray(found) ? found : [])
+          .map((model) => (typeof model === "string" ? model : String(model?.id ?? model?.name ?? "")))
+          .filter((model) => model !== "");
+      } else if (Array.isArray(provider?.models)) {
+        models = provider.models
+          .map((model) => (typeof model === "string" ? model : String(model?.id ?? model?.name ?? "")))
+          .filter((model) => model !== "");
+      }
+      listed.push({ id, name: String(provider?.name ?? id), models });
+    }
+    return listed;
+  } catch {
+    return [];
+  }
 }
 
 /**

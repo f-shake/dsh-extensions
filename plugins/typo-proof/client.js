@@ -146,18 +146,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 宿主说了「这是演示模式」，面板就该换成内置演示源。
+     * 从「文件路径」取出它所在的目录。
      *
-     * 客户端插件拿不到 Loader 行的 config（`apply(ctx)` 只有一个参数），所以
-     * 「演示模式」这件事只能由宿主在 status 里告诉它。少了这一步，就会出现
-     * 「badge 写着演示数据、内容却是 0 段 0 字」的自相矛盾。
-     * @param {object} next - 宿主返回的状态。
-     * @param {string} kind - 当前数据源类型。
-     * @returns {boolean} 是否切换到演示源。
+     * 只有文件框需要它；目录里再进目录要走 loadDir，否则「上一级」会被多切一层
+     * （C:\\Running\\dsh 会跳到 C:\\）。
+     * @param {string} filePath - 文件路径。
+     * @returns {string} 所在目录；没有分隔符时为空串。
      */
-    function shouldUseDemo(next, kind) {
-      if (kind === 'demo') return false;
-      return next !== null && typeof next === 'object' && next.demo === true;
+    function dirOf(filePath) {
+      const text = String(filePath ?? '');
+      const cut = Math.max(text.lastIndexOf('\\'), text.lastIndexOf('/'));
+      if (cut > 0) {
+        const head = text.slice(0, cut);
+        // Windows 上 "C:" 不是盘符根，是「C 盘当前目录」——补回分隔符才不会跳到无关位置。
+        return /^[a-zA-Z]:$/.test(head) ? `${head}\\` : head;
+      }
+      return '';
     }
 
     /**
@@ -167,12 +171,15 @@ window.__ModuleLoader__.load({
      * 这件事没有任何用例看得见。
      * @param {{ status: string }} state - 规整后的状态。
      * @param {object | null} failure - 拉状态时的异常。
+     * @param {boolean} [forceEmpty] - 用户点了「换文件」：把已完成的结果收起来。
      * @returns {'failure' | 'loading' | 'error' | 'idle' | 'active'} 视图种类。
      */
-    function viewOf(state, failure) {
+    function viewOf(state, failure, forceEmpty = false) {
       if (failure !== null && failure !== undefined) return 'failure';
       const status = state !== null && typeof state === 'object' ? state.status : undefined;
       if (status === 'loading' || status === undefined) return 'loading';
+      // 只收起「已完成」，运行中的任务不能靠点按钮躲掉。
+      if (forceEmpty === true && status === DONE) return 'idle';
       if (status === ERROR) return 'error';
       if (status === IDLE) return 'idle';
       return 'active';
@@ -224,14 +231,15 @@ window.__ModuleLoader__.load({
       const progress = source.progress !== null && typeof source.progress === 'object' ? source.progress : {};
       return {
         status: [IDLE, RUNNING, DONE, ERROR].includes(source.status) ? source.status : IDLE,
-        demo: source.demo === true,
         file: typeof source.file === 'string' ? source.file : '',
+        filePath: typeof source.filePath === 'string' ? source.filePath : '',
         dir: typeof source.dir === 'string' ? source.dir : '',
         segments: Number(source.segments) || 0,
         hanzi: Number(source.hanzi) || 0,
         localModel: typeof source.localModel === 'string' ? source.localModel : '',
         reviewModel: typeof source.reviewModel === 'string' ? source.reviewModel : '',
         minHanzi: Number(source.minHanzi) || 0,
+        samples: Number(source.samples) || 3,
         progress: {
           localDone: Number(progress.localDone) || 0,
           localTotal: Number(progress.localTotal) || Number(source.segments) || 0,
@@ -249,290 +257,19 @@ window.__ModuleLoader__.load({
       };
     }
 
-    /** 演示用的候选。真实数据由 2b 的后端给，这里只负责让流程看得见。 */
-    const DEMO_ITEMS = [
-      {
-        seg: 12,
-        prev: '那年冬天特别冷，我住在城西一间没有暖气的出租屋里。',
-        original: '那时候我每天都要花四个小时在论坛上回复贴子。',
-        corrected: '那时候我每天都要花四个小时在论坛上回复帖子。',
-        next: '回完之后手指都僵了，但心里是热的。',
-        hits: 3,
-        state: 'confirmed',
-        samples: [
-          '那时候我每天都要花四个小时在论坛上回复帖子。',
-          '那时候我每天都要花四个小时在论坛上回复帖子。',
-          '那时候我每天都要花四个小时在论坛上回复帖子。',
-        ],
-        note: '三次采样都改成了“帖子”。',
-      },
-      {
-        seg: 35,
-        prev: '我妈在电话里说了很久，最后叹了口气。',
-        original: '我妈说我这样下去不是办法，迟早要担误了自己。',
-        corrected: '我妈说我这样下去不是办法，迟早要耽误了自己。',
-        next: '我嘴上应着，心里并不服气。',
-        hits: 3,
-        state: 'confirmed',
-        samples: [
-          '我妈说我这样下去不是办法，迟早要耽误了自己。',
-          '我妈说我这样下去不是办法，迟早要耽误了自己。',
-          '我妈说我这样下去不是办法，迟早要耽误了自己。',
-        ],
-        note: '三次采样都改成了“耽误”。',
-      },
-      {
-        seg: 74,
-        prev: '第一个月结账的时候，我盯着后台看了很久。',
-        original: '第一个月的收入是三百二十块，我还记得那个数子。',
-        corrected: '第一个月的收入是三百二十块，我还记得那个数字。',
-        next: '三百二十块，连房租都不够。',
-        hits: 2,
-        state: 'disputed',
-        samples: [
-          '第一个月的收入是三百二十块，我还记得那个数字。',
-          '第一个月的收入是三百二十块，我还记得那个数字。',
-          '第一个月的收入是三百二十块，我还记得那个数目。',
-        ],
-        note: '两次判为“数字”，一次判为“数目”，需要人定夺。',
-      },
-      {
-        seg: 118,
-        prev: '那天下午我一直在等他的电话。',
-        original: '他给我发了一条消息，说这批货以经发出去了。',
-        corrected: '他给我发了一条消息，说这批货已经发出去了。',
-        next: '我松了一口气，又有点慌。',
-        hits: 3,
-        state: 'confirmed',
-        samples: [
-          '他给我发了一条消息，说这批货已经发出去了。',
-          '他给我发了一条消息，说这批货已经发出去了。',
-          '他给我发了一条消息，说这批货已经发出去了。',
-        ],
-        note: '三次采样都改成了“已经”。',
-      },
-      {
-        seg: 152,
-        prev: '她说话的时候一直看着别处。',
-        original: '那种感觉很奇妙，像是一下子被人看透了心是。',
-        corrected: '那种感觉很奇妙，像是一下子被人看透了心事。',
-        next: '我赶紧把话题岔开了。',
-        hits: 2,
-        state: 'disputed',
-        samples: [
-          '那种感觉很奇妙，像是一下子被人看透了心事。',
-          '那种感觉很奇妙，像是一下子被人看透了心事。',
-          '那种感觉很奇妙，像是一下子被人看透了心思。',
-        ],
-        note: '两次判为“心事”，一次判为“心思”，需要人定夺。',
-      },
-      {
-        seg: 187,
-        prev: '价格来来回回谈了好几轮。',
-        original: '我在旺旺上跟他聊了两个小时，最后还是没谈陇。',
-        corrected: '我在旺旺上跟他聊了两个小时，最后还是没谈拢。',
-        next: '第二天他却在别家下了单。',
-        hits: 3,
-        state: 'confirmed',
-        samples: [
-          '我在旺旺上跟他聊了两个小时，最后还是没谈拢。',
-          '我在旺旺上跟他聊了两个小时，最后还是没谈拢。',
-          '我在旺旺上跟他聊了两个小时，最后还是没谈拢。',
-        ],
-        note: '三次采样都改成了“谈拢”。',
-      },
-      {
-        seg: 205,
-        prev: '毕业之后我先去了一家广告公司。',
-        original: '我在那家公司做了三个月就辞职了。',
-        corrected: '我在那家公司作了三个月就辞职了。',
-        next: '现在想起来，那三个月也不是全无用处。',
-        hits: 3,
-        state: 'rejected',
-        samples: [
-          '我在那家公司作了三个月就辞职了。',
-          '我在那家公司作了三个月就辞职了。',
-          '我在那家公司作了三个月就辞职了。',
-        ],
-        note: '云端认为“做了三个月”用法正确，建议保留原文。',
-      },
-      {
-        seg: 229,
-        prev: '那段时间我几乎每天都在群里说话。',
-        original: '9月中旬，我的群人数终于达到了1000人满人，需要清除一些人。',
-        corrected: '9月中旬，我的群人数终于达到了1000人满员，需要清除一些人。',
-        next: '踢人的时候我还犹豫了很久。',
-        hits: 2,
-        state: 'confirmed',
-        samples: [
-          '9月中旬，我的群人数终于达到了1000人满员，需要清除一些人。',
-          '9月中旬，我的群人数终于达到了1000人满员，需要清除一些人。',
-          '9月中旬，我的群人数终于达到了1000人满，需要清除一些人。',
-        ],
-        note: '两次改“满人”为“满员”；第三次只删了“人”，按同一处改动计。',
-      },
-      {
-        seg: 231,
-        prev: '那天下午我跑了三趟快递点。',
-        original: '那天晚上我睡的特别早，第二天起来天还没亮。',
-        corrected: '那天晚上我睡得特别早，第二天起来天还没亮。',
-        next: '窗外的雨下了一整夜。',
-        hits: 3,
-        state: 'confirmed',
-        samples: [
-          '那天晚上我睡得特别早，第二天起来天还没亮。',
-          '那天晚上我睡得特别早，第二天起来天还没亮。',
-          '那天晚上我睡得特别早，第二天起来天还没亮。',
-        ],
-        note: '三次采样都改成了“睡得”。',
-      },
-    ];
-
-    /** 演示文件的元信息：直接用那本日记里的真实尺寸，进度条看起来才像真的。 */
-    const DEMO_META = {
-      demo: true,
-      file: '2011~2014.docx',
-      dir: 'C:\\Users\\autod\\OneDrive\\旧事重提\\日记',
-      segments: 234,
-      hanzi: 16_916,
-      localModel: 'lmstudio / qwen3-4b',
-      reviewModel: 'deepseek-official / deepseek-flash',
-      minHanzi: 8,
-    };
-
     /**
-     * 构造一份演示状态。
-     *
-     * 三种起点：idle 等用户点开始；running 停在 62% 且不再走动（截图与设计评审用，
-     * 时钟一跑就截不到同一帧）；done 直接给完整结果。
-     * @param {'idle' | 'running' | 'done'} stage - 起点。
-     * @returns {object} 规整后的状态。
+     * 取一段 JSON。非 2xx 或响应不是 JSON 都抛错，带服务端给的错误文案。
+     * @param {string} url - 地址。
+     * @param {object} [init] - fetch 参数。
+     * @returns {Promise<object>} 响应体。
      */
-    function demoState(stage) {
-      const base = { ...DEMO_META, status: IDLE, items: [], progress: {} };
-      if (stage === 'done') {
-        return normalizeState({
-          ...base,
-          status: DONE,
-          items: DEMO_ITEMS,
-          progress: { localDone: DEMO_META.segments, localTotal: DEMO_META.segments, reviewDone: DEMO_ITEMS.length, reviewTotal: DEMO_ITEMS.length },
-        });
+    async function requestJson(url, init) {
+      const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...init });
+      const body = await response.json().catch(() => null);
+      if (!response.ok || body === null) {
+        throw new Error(body !== null && typeof body.error === 'string' ? body.error : `请求失败（HTTP ${response.status}）`);
       }
-      if (stage === 'running') {
-        const half = DEMO_ITEMS.slice(0, 4);
-        return normalizeState({
-          ...base,
-          status: RUNNING,
-          items: half,
-          progress: { localDone: 145, localTotal: DEMO_META.segments, reviewDone: 2, reviewTotal: half.length },
-        });
-      }
-      return normalizeState(base);
-    }
-
-    /**
-     * 演示数据源：把一次检查按 60ms 一帧走完，让界面上的每个状态都真的出现过。
-     *
-     * 2b 的 source 形状与这里一致（read/subscribe/start/pause/resume/stop），
-     * 换掉实现就能接后端，面板代码不用动。
-     * @param {{ preload?: 'idle' | 'running' | 'done' }} [options] - 起点。
-     * @returns {object} 数据源。
-     */
-    function createDemoSource(options = {}) {
-      const preload = options.preload === 'running' || options.preload === 'done' ? options.preload : 'idle';
-      let state = demoState(preload);
-      let timer = null;
-      let paused = false;
-      const listeners = new Set();
-
-      function emit() {
-        for (const listener of listeners) listener(state);
-      }
-
-      function stopTimer() {
-        if (timer !== null) {
-          clearInterval(timer);
-          timer = null;
-        }
-      }
-
-      /** 走一帧：先把本地采样推满，再逐句复核。 */
-      function tick() {
-        const items = state.items.slice();
-        const localDone = Math.min(state.segments, state.progress.localDone + 6);
-        for (const item of DEMO_ITEMS) {
-          if (item.seg <= localDone && !items.some((seen) => seen.seg === item.seg)) items.push(item);
-        }
-        items.sort((a, b) => a.seg - b.seg);
-        const reviewTotal = items.length;
-        const reviewDone = Math.min(reviewTotal, state.progress.reviewDone + (localDone >= state.segments ? 1 : 0));
-        const finished = localDone >= state.segments && reviewDone >= reviewTotal;
-        state = normalizeState({
-          ...state,
-          status: finished ? DONE : RUNNING,
-          items,
-          progress: {
-            localDone,
-            localTotal: state.segments,
-            reviewDone: finished ? reviewTotal : reviewDone,
-            reviewTotal,
-          },
-        });
-        emit();
-        if (finished) stopTimer();
-      }
-
-      function ensureTimer() {
-        if (timer !== null) return;
-        timer = setInterval(tick, 60);
-      }
-
-      return {
-        kind: 'demo',
-        /**
-         * 拉起当前状态。演示源永远立即有值。
-         * @returns {Promise<object>} 状态。
-         */
-        read() {
-          return Promise.resolve(state);
-        },
-        /**
-         * 订阅推送。
-         * @param {(next: object) => void} listener - 回调。
-         * @returns {() => void} 退订。
-         */
-        subscribe(listener) {
-          listeners.add(listener);
-          return () => listeners.delete(listener);
-        },
-        start() {
-          if (state.status === RUNNING) return;
-          state = normalizeState({ ...state, status: RUNNING, note: '', items: [], progress: { localDone: 0, localTotal: state.segments, reviewDone: 0, reviewTotal: 0 } });
-          paused = false;
-          emit();
-          ensureTimer();
-        },
-        pause() {
-          if (state.status !== RUNNING) return;
-          paused = true;
-          stopTimer();
-          state = normalizeState({ ...state, status: RUNNING, note: '已暂停' });
-          emit();
-        },
-        resume() {
-          if (!paused) return;
-          paused = false;
-          state = normalizeState({ ...state, note: '' });
-          emit();
-          ensureTimer();
-        },
-        stop() {
-          paused = false;
-          stopTimer();
-          state = normalizeState({ ...state, status: IDLE, items: [], progress: {} });
-          emit();
-        },
-      };
+      return body;
     }
 
     /**
@@ -544,14 +281,26 @@ window.__ModuleLoader__.load({
       const statusUrl = typeof options?.statusUrl === 'string' ? options.statusUrl : '/typo-proof/status';
       const actionUrl = typeof options?.actionUrl === 'string' ? options.actionUrl : '/typo-proof/action';
 
-      /** @param {string} action - start / pause / resume / stop。 */
-      function send(action) {
+      /**
+       * 发动作。
+       * @param {string} action - start / pause / resume / stop。
+       * @param {object} [extra] - 额外字段（start 要带 file）。
+       * @returns {Promise<object | undefined>} 服务端响应。
+       */
+      function send(action, extra) {
         return fetch(actionUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ action }),
+          body: JSON.stringify({ action, ...extra }),
           credentials: 'same-origin',
-        }).catch(() => undefined);
+        })
+          .then((response) => response.json().catch(() => ({})))
+          .then((body) => {
+            if (body !== null && typeof body === 'object' && body.ok === false) {
+              throw Object.assign(new Error(String(body.error ?? '请求失败')), { code: 'http-error' });
+            }
+            return body;
+          });
       }
 
       return {
@@ -572,7 +321,8 @@ window.__ModuleLoader__.load({
         subscribe() {
           return () => {};
         },
-        start: () => send('start'),
+        /** @param {{ file?: string }} [payload] - 要检查的文件。 */
+        start: (payload) => send('start', { file: typeof payload?.file === 'string' ? payload.file : '' }),
         pause: () => send('pause'),
         resume: () => send('resume'),
         stop: () => send('stop'),
@@ -599,6 +349,9 @@ window.__ModuleLoader__.load({
         '.tp-sub{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
         '.tp-badge{flex:0 0 auto;margin-left:auto;font-size:10px;padding:0 6px;border-radius:999px;line-height:16px;',
         'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.24));color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+        // 头部右上角一组：演示标记 + 设置入口，整组靠右。
+        '.tp-head-tools{margin-left:auto;flex:0 0 auto;display:flex;align-items:center;gap:10px;min-width:0}',
+        '.tp-head-tools .tp-badge{margin-left:0}',
         '.tp-body{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:10px 12px}',
         '.tp-foot{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18))}',
         '.tp-foot-note{flex:1 1 auto;min-width:0;font-size:10px;color:var(--dsw-alias-label-tertiary,#8a8f98);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
@@ -679,6 +432,39 @@ window.__ModuleLoader__.load({
         '.tp-error{padding:10px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#d33) 40%,transparent);',
         'border-radius:10px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d33) 8%,transparent);',
         'font-size:12px;color:var(--dsw-alias-state-error-primary,#d33);line-height:1.6}',
+        // 设置表单：字段竖排，两个数字并排，其余整行。
+        '.tp-input-row{display:flex;align-items:center;gap:6px;min-width:0}',
+        '.tp-input-row .tp-input{flex:1 1 auto;min-width:0}',
+        '.tp-picker{display:flex;flex-direction:column;gap:8px;min-height:0;flex:1 1 auto}',
+        '.tp-picker-bar{display:flex;align-items:center;gap:8px;min-width:0}',
+        '.tp-picker-path{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
+        'font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+        '.tp-picker-list{flex:1 1 auto;min-height:120px;overflow:auto;display:flex;flex-direction:column;gap:1px;',
+        'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;padding:4px}',
+        '.tp-picker-row{display:flex;align-items:center;gap:8px;width:100%;padding:5px 8px;border:0;border-radius:7px;',
+        'background:none;font:inherit;font-size:12px;color:inherit;cursor:pointer;text-align:left}',
+        '.tp-picker-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))}',
+        '.tp-picker-row[data-selected="true"]{background:color-mix(in srgb,var(--dsw-static-deepseek-500,#4176e6) 14%,transparent);',
+        'color:var(--dsw-static-deepseek-500,#4176e6)}',
+        '.tp-picker-icon{flex:0 0 auto;font-size:9px;line-height:16px;padding:0 5px;border-radius:5px;',
+        'background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+        '.tp-picker-icon[data-kind="docx"]{background:color-mix(in srgb,var(--dsw-static-deepseek-500,#4176e6) 18%,transparent);',
+        'color:var(--dsw-static-deepseek-500,#4176e6)}',
+        '.tp-picker-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.tp-form{display:flex;flex-direction:column;gap:10px}',
+        // 空态里那块表单要占满宽度：父级 align-items:center 会把输入框压成内容宽度。
+        '.tp-empty .tp-form{width:100%;text-align:left}',
+        '.tp-field{display:flex;flex-direction:column;gap:3px;min-width:0}',
+        '.tp-field > label{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+        '.tp-input{box-sizing:border-box;width:100%;height:28px;padding:0 8px;border-radius:8px;',
+        'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.28));background:var(--dsw-alias-bg-base,#fff);',
+        'color:var(--dsw-alias-label-primary,#14181f);font:inherit;font-size:12px;outline:none}',
+        '.tp-input:focus{border-color:var(--dsw-static-deepseek-500,#4176e6)}',
+        '.tp-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}',
+        '.tp-check{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary,#4b5563)}',
+        '.tp-check input{width:14px;height:14px;margin:0}',
+        '.tp-help{margin:0;font-size:10px;line-height:1.55;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+        '.tp-form-actions{display:flex;justify-content:flex-end;gap:8px;padding-top:2px}',
         // 对话里的工具卡片
         '.tp-card{box-sizing:border-box;display:flex;flex-direction:column;gap:8px;max-width:100%;padding:10px 12px;',
         'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.22));border-radius:12px;',
@@ -785,7 +571,7 @@ window.__ModuleLoader__.load({
      * @param {{ item: object, expanded: boolean, onToggle: () => void }} props - 候选与展开状态。
      * @returns {object} 元素。
      */
-    function IssueRow({ item, expanded, onToggle }) {
+    function IssueRow({ item, expanded, onToggle, samples }) {
       const bodyId = `tp-detail-${itemKey(item).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
       const full = diffChars(item.original, item.corrected);
       // 否决项：“模型动过这个字”而不是“这个字要删掉”。
@@ -807,7 +593,7 @@ window.__ModuleLoader__.load({
             'span',
             { className: 'tp-issue-meta' },
             h('span', { className: 'tp-seg' }, `第 ${item.seg} 段`),
-            h('span', { className: 'tp-hits' }, `${item.hits}/3`),
+            h('span', { className: 'tp-hits' }, `${item.hits}/${samples}`),
             h('span', { className: 'tp-pill', 'data-state': item.state }, stateLabel(item.state)),
           ),
           h('span', { className: 'tp-text' }, renderParts(parts)),
@@ -850,46 +636,61 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 空态：还没开始跑时给文件信息、参数与主按钮。
-     * @param {{ state: object, onStart: () => void }} props - 状态与开始回调。
+     * 空态：选文件、看参数、点开始。
+     *
+     * 文件放在这里而不是设置里：它是一次运行的输入，不是一份长期配置。
+     * 设置里只留模型和数字这类「配一次管很久」的东西。
+     * 路径是受控的：选完文件只填进输入框，**开始要用户自己点**——文件选择框
+     * 顺手把任务跑起来，是最容易被吓一跳的交互。
+     * @param {{ state: object, filePath: string, onChangeFile: (path: string) => void, onStart: () => void, onBrowse: () => void }} props - 属性。
      * @returns {object} 元素。
      */
-    function EmptyState({ state, onStart }) {
+    function EmptyState({ state, filePath, onChangeFile, onStart, onBrowse }) {
+      const full = String(filePath ?? '');
+
       return h(
         'div',
         { className: 'tp-empty' },
-        h(
-          'div',
-          { className: 'tp-empty-icon', 'aria-hidden': 'true' },
-          h(
-            'svg',
-            { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8 },
-            h('circle', { cx: 10.5, cy: 10.5, r: 6.5 }),
-            h('path', { d: 'M15.5 15.5 21 21', strokeLinecap: 'round' }),
-          ),
-        ),
         h(
           'p',
           null,
           '逐句交给本地模型检查三次，其中两次改动了这句时，把这些改动（含只出现一次的地方）交给云端复核；确认的改动写进文档副本的修订模式，原文件不动。',
         ),
         h(
+          'div',
+          { className: 'tp-form' },
+          h(
+            'div',
+            { className: 'tp-field' },
+            h('label', null, '要检查的 docx'),
+            h(
+              'div',
+              { className: 'tp-input-row' },
+              h('input', {
+                className: 'tp-input',
+                value: full,
+                placeholder: 'C:\\…\\2011~2014.docx',
+                onChange: (event) => onChangeFile(event.target.value),
+              }),
+              h('button', { type: 'button', className: 'tp-btn', 'data-size': 'sm', onClick: onBrowse }, '浏览…'),
+            ),
+          ),
+        ),
+        h(
           'dl',
           { className: 'tp-params' },
-          h('dt', null, '文件'),
-          h('dd', { title: state.file }, state.file === '' ? '未选择' : state.file),
           h('dt', null, '规模'),
-          h('dd', null, `${state.segments} 段 · ${formatCount(state.hanzi)} 字`),
-          h('dt', null, '本地'),
-          h('dd', { title: state.localModel }, state.localModel === '' ? '未配置' : state.localModel),
+          h('dd', null, state.segments === 0 ? '还没读过这份文件' : `${state.segments} 段 · ${formatCount(state.hanzi)} 字`),
+          h('dt', null, '采样'),
+          h('dd', { title: state.localModel }, state.localModel === '' ? '未配置（去设置里选）' : state.localModel),
           h('dt', null, '复核'),
-          h('dd', { title: state.reviewModel }, state.reviewModel === '' ? '未配置' : state.reviewModel),
+          h('dd', { title: state.reviewModel }, state.reviewModel === '' ? '跟随本地模型' : state.reviewModel),
           h('dt', null, '规则'),
-          h('dd', null, `每句 ≥${state.minHanzi} 字 · 采样 3 次`),
+          h('dd', null, `每句 ≥${state.minHanzi} 字 · 采样 ${state.samples} 次`),
         ),
         h(
           'button',
-          { type: 'button', className: 'tp-btn', 'data-variant': 'primary', onClick: onStart },
+          { type: 'button', className: 'tp-btn', 'data-variant': 'primary', disabled: full === '', onClick: onStart },
           '开始检查',
         ),
       );
@@ -911,10 +712,10 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'tp-prog-row' },
-          h('span', null, `已检查 ${localDone} / ${localTotal} 段`),
+          h('span', null, `已检查 ${localDone} / ${localTotal} 句`),
           h('b', null, `${pct}%`),
         ),
-        h('div', { className: 'tp-stage' }, `本地采样 ${localDone * 3} 次 · 云端复核 ${reviewDone} / ${reviewTotal} 句`),
+        h('div', { className: 'tp-stage' }, `本地采样 ${localDone * state.samples} 次 · 云端复核 ${reviewDone} / ${reviewTotal} 条`),
         h(
           'div',
           { className: 'tp-actions' },
@@ -974,6 +775,7 @@ window.__ModuleLoader__.load({
               h(IssueRow, {
                 // 同一段里可能有好几处改动，key 只能用候选自己的 id。
                 key: itemKey(item),
+                samples: state.samples ?? 3,
                 item,
                 expanded: expanded === itemKey(item),
                 onToggle: () => onToggle(itemKey(item)),
@@ -983,11 +785,229 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 面板里的设置表单。
+     *
+     * 只放「跑一次要用到的值」：文件、两个模型、三个数字、演示开关。
+     * 存到宿主上的 settings.json；保存后立刻生效，因为服务端每次请求都会重读一遍。
+     * @param {{ config: object, providers: object[], error: string, saving: boolean, onSave: (patch: object) => void, onCancel: () => void }} props - 属性。
+     * @returns {object} 元素。
+     */
+    function SettingsForm({ config, providers, error, saving, onSave, onCancel }) {
+      const [draft, setDraft] = useState({
+        localProvider: String(config.localProvider ?? ''),
+        localModel: String(config.localModel ?? ''),
+        reviewProvider: String(config.reviewProvider ?? ''),
+        reviewModel: String(config.reviewModel ?? ''),
+        minHanzi: String(config.minHanzi ?? 8),
+        samples: String(config.samples ?? 3),
+        concurrency: String(config.concurrency ?? 3),
+      });
+
+      const providerIds = providers.map((provider) => provider.id).filter((id) => typeof id === 'string' && id !== '');
+      const modelsFor = (providerId) => {
+        const found = providers.find((provider) => provider.id === providerId);
+        return found !== undefined && Array.isArray(found.models) ? found.models : [];
+      };
+
+      const text = (key) => ({
+        className: 'tp-input',
+        value: draft[key],
+        onChange: (event) => setDraft({ ...draft, [key]: event.target.value }),
+      });
+
+      /**
+       * provider / 模型的选择框。
+       *
+       * 有清单就用下拉（值来自模型栏，不会拼错）；清单为空——模型服务还没就绪、
+       * 或者这是个自定义名字——退回输入框，不能把人卡死在一个空下拉里。
+       * @param {string} key - 字段名。
+       * @param {string[]} options - 可选项。
+       * @param {string} placeholder - 输入框占位文案。
+       * @param {boolean} [allowEmpty] - 是否给一个“留空”选项。
+       * @returns {object} 元素。
+       */
+      function picker(key, options, placeholder, allowEmpty = false) {
+        const values = options.includes(draft[key]) || draft[key] === '' ? options : [draft[key], ...options];
+        if (values.length === 0) return h('input', { ...text(key), placeholder });
+        return h(
+          'select',
+          { className: 'tp-input', value: draft[key], onChange: (event) => setDraft({ ...draft, [key]: event.target.value }) },
+          allowEmpty ? h('option', { value: '' }, '跟随本地模型') : null,
+          values.map((value) => h('option', { key: value, value }, value)),
+        );
+      }
+
+      /**
+       * provider 选择框。换 provider 时把模型重置成它的第一个：留着旧 provider 的模型名，
+       * 保存下去就是一个不存在的组合。
+       * @param {string} providerKey - provider 字段名。
+       * @param {string} modelKey - 模型字段名。
+       * @param {boolean} allowEmpty - 是否给“跟随本地模型”这一项。
+       * @returns {object} 元素。
+       */
+      function providerPicker(providerKey, modelKey, allowEmpty) {
+        if (providerIds.length === 0) return h('input', { ...text(providerKey), placeholder: 'lmstudio' });
+        return h(
+          'select',
+          {
+            className: 'tp-input',
+            value: draft[providerKey],
+            onChange: (event) => {
+              const next = event.target.value;
+              const models = modelsFor(next);
+              setDraft({ ...draft, [providerKey]: next, [modelKey]: models.length > 0 ? models[0] : '' });
+            },
+          },
+          allowEmpty ? h('option', { value: '' }, '跟随本地模型') : null,
+          providerIds.map((value) => h('option', { key: value, value }, value)),
+        );
+      }
+
+      function submit() {
+        onSave({
+          localProvider: draft.localProvider.trim(),
+          localModel: draft.localModel.trim(),
+          reviewProvider: draft.reviewProvider.trim(),
+          reviewModel: draft.reviewModel.trim(),
+          minHanzi: Number(draft.minHanzi),
+          samples: Number(draft.samples),
+          concurrency: Number(draft.concurrency),
+        });
+      }
+
+      const localModels = modelsFor(draft.localProvider);
+      const reviewModels = modelsFor(draft.reviewProvider);
+      const empty = providerIds.length === 0;
+
+      return h(
+        'div',
+        { className: 'tp-body' },
+        h(
+          'div',
+          { className: 'tp-form' },
+          h(
+            'div',
+            { className: 'tp-row' },
+            h('div', { className: 'tp-field' }, h('label', null, '采样 provider'), providerPicker('localProvider', 'localModel', false)),
+            h('div', { className: 'tp-field' }, h('label', null, '采样模型'), picker('localModel', localModels, 'qwen3-4b')),
+          ),
+          h('p', { className: 'tp-help' }, empty
+            ? '模型栏里还没有可用的 provider：先去「设置 → 模型」添加一个（比如 LM Studio 的 http://127.0.0.1:1234/v1），回来这里就会有下拉。'
+            : '下面这两行直接取自模型栏，选就行，不用手打。'),
+          h(
+            'div',
+            { className: 'tp-row' },
+            h('div', { className: 'tp-field' }, h('label', null, '复核 provider'), providerPicker('reviewProvider', 'reviewModel', true)),
+            h('div', { className: 'tp-field' }, h('label', null, '复核模型'), picker('reviewModel', reviewModels, 'deepseek-flash', true)),
+          ),
+          h('p', { className: 'tp-help' }, '复核留空时用采样那套模型自审，报告里会记下来；想让云端独立复核，这里选一个不同家的模型。'),
+          h(
+            'div',
+            { className: 'tp-row' },
+            h('div', { className: 'tp-field' }, h('label', null, '最小汉字数'), h('input', { ...text('minHanzi'), type: 'number', min: 1, max: 100 })),
+            h('div', { className: 'tp-field' }, h('label', null, '每句采样次数'), h('input', { ...text('samples'), type: 'number', min: 1, max: 10 })),
+          ),
+          h('div', { className: 'tp-field' }, h('label', null, '本地并发'), h('input', { ...text('concurrency'), type: 'number', min: 1, max: 16 })),
+          error === '' ? null : h('div', { className: 'tp-error' }, error),
+          h(
+            'div',
+            { className: 'tp-form-actions' },
+            h('button', { type: 'button', className: 'tp-btn', 'data-size': 'sm', onClick: onCancel, disabled: saving }, '取消'),
+            h('button', { type: 'button', className: 'tp-btn', 'data-variant': 'primary', 'data-size': 'sm', onClick: submit, disabled: saving }, saving ? '保存中…' : '保存'),
+          ),
+        ),
+      );
+    }
+
+    /**
+     * 文件选择框。
+     *
+     * 为什么自己做一个：宿主的「选择工作区目录」对话框绑死在「设置工作目录」上，
+     * 而且它只列目录、不列文件（宿主后端明确把非目录条目跳过）。挑一个要校对的
+     * docx 和「换工作目录」是两件事，混在一起只会让人误会。
+     * 这里只做三件事：列目录、进目录、选中 .docx。
+     * @param {{ view: object, onOpen: (dir: string) => void, onPick: (path: string) => void, onCancel: () => void }} props - 视图与回调。
+     * @returns {object} 元素。
+     */
+    function FilePicker({ view, onOpen, onPick, onCancel }) {
+      const [selected, setSelected] = useState('');
+
+      // 换目录就把选中清掉：同一个组件实例，不重置的话「用这个文件」还指着上一层那个文件。
+      useEffect(() => setSelected(''), [view.dir]);
+      const dirs = Array.isArray(view.dirs) ? view.dirs : [];
+      const files = Array.isArray(view.files) ? view.files : [];
+
+      return h(
+        'div',
+        { className: 'tp-body' },
+        h(
+          'div',
+          { className: 'tp-picker' },
+          h(
+            'div',
+            { className: 'tp-picker-bar' },
+            h(
+              'button',
+              { type: 'button', className: 'tp-btn', 'data-size': 'sm', onClick: () => onOpen(view.parent) },
+              '上一级',
+            ),
+            h('span', { className: 'tp-picker-path', title: view.dir }, view.dir),
+          ),
+          view.error === '' ? null : h('div', { className: 'tp-error' }, view.error),
+          h(
+            'div',
+            { className: 'tp-picker-list', role: 'listbox', 'aria-label': '目录与文件' },
+            dirs.map((entry) =>
+              h(
+                'button',
+                { key: `d-${entry.path}`, type: 'button', className: 'tp-picker-row', onClick: () => onOpen(entry.path) },
+                h('span', { className: 'tp-picker-icon' }, '目录'),
+                h('span', { className: 'tp-picker-name' }, entry.name),
+              ),
+            ),
+            files.map((entry) =>
+              h(
+                'button',
+                {
+                  key: `f-${entry.path}`,
+                  type: 'button',
+                  className: 'tp-picker-row',
+                  'data-selected': selected === entry.path ? 'true' : 'false',
+                  onClick: () => setSelected(entry.path),
+                },
+                h('span', { className: 'tp-picker-icon', 'data-kind': 'docx' }, 'DOC'),
+                h('span', { className: 'tp-picker-name' }, entry.name),
+              ),
+            ),
+            dirs.length === 0 && files.length === 0
+              ? h('p', { className: 'tp-note' }, '这一层没有子目录，也没有 .docx。')
+              : null,
+          ),
+          h(
+            'div',
+            { className: 'tp-form-actions' },
+            h('button', { type: 'button', className: 'tp-btn', 'data-size': 'sm', onClick: onCancel }, '取消'),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'tp-btn',
+                'data-variant': 'primary',
+                'data-size': 'sm',
+                disabled: selected === '',
+                onClick: () => onPick(selected),
+              },
+              '用这个文件',
+            ),
+          ),
+        ),
+      );
+    }
+
+    /**
      * 侧栏正文。
      *
-     * 数据源由 apply 注入：`demo: true` 用演示源，否则走 2b 的 /typo-proof。
-     * 后端还没接上时给一个明确的错误态，并留一个改用演示数据的入口，
-     * 免得面板在 2a 阶段只能看见一片空白。
+     * 数据源由 apply 注入，固定是 /typo-proof 那一套（面板不再有演示模式）。
      * @param {{ source?: object, sessionId?: string }} props - 数据源。
      * @returns {object} 元素。
      */
@@ -999,6 +1019,55 @@ window.__ModuleLoader__.load({
       // 预览页会指定默认展开的段号；真实宿主不传，就是全部收起。
       const [expanded, setExpanded] = useState(typeof props.initialExpanded === 'string' ? props.initialExpanded : null);
       const [failure, setFailure] = useState(null);
+      const [picker, setPicker] = useState(null);
+      // 跑完之后点「换文件」：把结果收起来，回到空态等下一次输入。
+      const [forceEmpty, setForceEmpty] = useState(false);
+      // 要检查的文件：选一次、改一次，属于这次运行，不属于长期配置。
+      const [filePath, setFilePath] = useState('');
+
+      // 只在第一次拿到配置时填一次；之后用户清空输入框也不许再填回来。
+      const seeded = useRef(false);
+      useEffect(() => {
+        if (seeded.current) return;
+        if (typeof state.filePath === 'string' && state.filePath !== '') {
+          seeded.current = true;
+          setFilePath(state.filePath);
+        }
+      }, [state.filePath]);
+
+      /**
+       * 打开某个目录。传空串时由后端决定起点（配置里的文件所在目录，或用户主目录）。
+       * @param {string} dir - 目录绝对路径。
+       */
+      async function loadDir(dir) {
+        setPicker({ dir, parent: dir, dirs: [], files: [], error: '', loading: true });
+        try {
+          const payload = await requestJson(`/typo-proof/files?dir=${encodeURIComponent(dir)}`);
+          setPicker({ dir: payload.dir, parent: payload.parent, dirs: payload.dirs, files: payload.files, error: '', loading: false });
+        } catch (error) {
+          // parent 保留上一个目录：进到没权限的地方时，至少还能退回去。
+          setPicker((current) => ({
+            dir,
+            parent: current !== null && typeof current.parent === 'string' && current.parent !== '' ? current.parent : dir,
+            dirs: [],
+            files: [],
+            error: String(error?.message ?? error),
+            loading: false,
+          }));
+        }
+      }
+
+      /**
+       * 从当前输入框里的文件路径打开选择框。
+       * @param {string} current - 文件完整路径。
+       */
+      async function openPicker(current) {
+        await loadDir(dirOf(current));
+      }
+      // 设置区：面板里唯一能改配置的地方。打开时才去拉配置与模型清单。
+      // config 为 null = 「还没读到」，此时不要渲染表单：表单的初值只在挂载时算一次，
+      // 拿空默认值挂上去再换 props，用户点保存就会把真实配置整份冲掉。
+      const [settings, setSettings] = useState({ open: false, config: null, providers: [], saving: false, error: '' });
 
       useEffect(() => {
         let alive = true;
@@ -1008,13 +1077,6 @@ window.__ModuleLoader__.load({
           .then(() => source.read())
           .then((next) => {
             if (!alive) return;
-            // 宿主开着演示模式时，面板要换成内置演示源：宿主那边的状态里只有配置，
-            // 没有演示数据。不换的话就会「badge 写着演示数据、界面却是 0 段 0 字」——
-            // 客户端插件拿不到 Loader 行的 config，只能靠这一趟 status 判断。
-            if (shouldUseDemo(next, source.kind)) {
-              setSource(createDemoSource());
-              return;
-            }
             setState(normalizeState(next));
           })
           .catch((error) => {
@@ -1037,7 +1099,10 @@ window.__ModuleLoader__.load({
         const timer = setInterval(() => {
           Promise.resolve()
             .then(() => source.read())
-            .then((next) => setState(normalizeState(next)))
+            .then((next) => {
+              setFailure(null);
+              setState(normalizeState(next));
+            })
             .catch(() => {});
         }, 1200);
         return () => clearInterval(timer);
@@ -1046,21 +1111,75 @@ window.__ModuleLoader__.load({
       function refresh() {
         Promise.resolve()
           .then(() => source.read())
-          .then((next) => setState(normalizeState(next)))
+          .then((next) => {
+            // 拉成功就把失败态清掉：否则一次网络抖动之后，面板永远停在错误页，
+            // 「重试」会真的重新请求、却什么也不变。
+            setFailure(null);
+            setState(normalizeState(next));
+          })
           .catch((error) => {
             setFailure({ message: String(error?.message ?? error), code: error?.code ?? 'unknown' });
           });
       }
 
+      /**
+       * 开始一次检查。文件用输入框里那个；重试时也用它。
+       */
       function onStart() {
+        setForceEmpty(false);
         if (typeof source.start !== 'function') return;
-        Promise.resolve(source.start())
+        const file = filePath.trim();
+        Promise.resolve(source.start(file === '' ? undefined : { file }))
           .then(refresh)
           .catch((error) => setFailure({ message: String(error?.message ?? error), code: error?.code ?? 'unknown' }));
       }
 
       function onStop() {
         if (typeof source.stop === 'function') Promise.resolve(source.stop()).then(refresh).catch(() => {});
+      }
+
+      /** 打开设置：配置与模型清单一起拉，省得用户在一个空白表单里手打模型名。 */
+      async function openSettings() {
+        setSettings((current) => ({ ...current, open: true, config: null, error: '' }));
+        try {
+          const [config, providers] = await Promise.all([
+            requestJson('/typo-proof/config'),
+            requestJson('/typo-proof/providers').catch(() => ({ providers: [] })),
+          ]);
+          setSettings({
+            open: true,
+            config: config.config !== null && typeof config.config === 'object' ? config.config : {},
+            providers: Array.isArray(providers.providers) ? providers.providers : [],
+            saving: false,
+            error: '',
+          });
+        } catch (error) {
+          // 拉配置失败也要把表单渲染出来：config 留在 null 的话，面板永远停在
+          // “正在读取配置…”，连错误都看不到，更没有重试的入口。
+          setSettings((current) => ({ ...current, config: {}, providers: [], saving: false, error: String(error?.message ?? error) }));
+        }
+      }
+
+      /**
+       * 保存设置。
+       *
+       * 保存完立刻重读一次状态：服务端每次请求都会重读配置文件，所以新值马上生效。
+       * @param {object} patch - 要保存的字段。
+       */
+      async function saveSettings(patch) {
+        setSettings((current) => ({ ...current, saving: true, error: '' }));
+        try {
+          const response = await requestJson('/typo-proof/config', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(patch),
+          });
+          const next = response.config !== null && typeof response.config === 'object' ? response.config : {};
+          setSettings({ open: false, config: next, providers: [], saving: false, error: '' });
+          refresh();
+        } catch (error) {
+          setSettings((current) => ({ ...current, saving: false, error: String(error?.message ?? error) }));
+        }
       }
 
       function onToggle(seg) {
@@ -1074,7 +1193,13 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'tp-head-row' },
           h('span', { className: 'tp-title' }, '错别字检查'),
-          state.demo === true ? h('span', { className: 'tp-badge' }, '演示数据') : null,
+          h(
+            'div',
+            { className: 'tp-head-tools' },
+            settings.open
+              ? h('button', { type: 'button', className: 'tp-link', onClick: () => setSettings((current) => ({ ...current, open: false })) }, '返回')
+              : h('button', { type: 'button', className: 'tp-link', onClick: openSettings }, '设置'),
+          ),
         ),
         h(
           'div',
@@ -1084,15 +1209,34 @@ window.__ModuleLoader__.load({
       );
 
       let body;
-      const view = viewOf(state, failure);
-      if (view === 'failure') {
+      const view = viewOf(state, failure, forceEmpty);
+      if (picker !== null) {
+        body = h(FilePicker, {
+          view: picker,
+          onOpen: (dir) => loadDir(dir),
+          onPick: (path) => {
+            setPicker(null);
+            if (path !== '') setFilePath(path);
+          },
+          onCancel: () => setPicker(null),
+        });
+      } else if (settings.open && settings.config === null) {
+        body = h('div', { className: 'tp-body' }, h('p', { className: 'tp-note' }, '正在读取配置…'));
+      } else if (settings.open) {
+        body = h(SettingsForm, {
+          config: settings.config,
+          providers: settings.providers,
+          error: settings.error,
+          saving: settings.saving,
+          onSave: saveSettings,
+          onCancel: () => setSettings((current) => ({ ...current, open: false })),
+        });
+      } else if (view === 'failure') {
         body = h(
           'div',
           { className: 'tp-body' },
-          h('div', { className: 'tp-error' }, failure.code === 'not-implemented' ? '后端还没接上（2b 接入）。现在可以先用演示数据看界面。' : failure.message),
-          failure.code === 'not-implemented'
-            ? h('button', { type: 'button', className: 'tp-btn', onClick: () => setSource(createDemoSource()) }, '用演示数据看界面')
-            : null,
+          h('div', { className: 'tp-error' }, failure.message),
+          h('button', { type: 'button', className: 'tp-btn', onClick: refresh }, '重试'),
         );
       } else if (view === 'loading') {
         body = h('div', { className: 'tp-body' }, h('p', { className: 'tp-note' }, '正在读取状态…'));
@@ -1111,16 +1255,24 @@ window.__ModuleLoader__.load({
           ),
         );
       } else if (view === 'idle') {
-        body = h('div', { className: 'tp-body' }, h(EmptyState, { state, onStart }));
+        body = h(
+          'div',
+          { className: 'tp-body' },
+          h(EmptyState, {
+            // 换文件时不要把上一次运行的段数/字数带过来。
+            state: forceEmpty ? { ...state, segments: 0, hanzi: 0 } : state,
+            filePath,
+            onChangeFile: setFilePath,
+            onStart,
+            onBrowse: () => openPicker(filePath),
+          }),
+        );
       } else {
         body = h(
           'div',
           { className: 'tp-body' },
           busy ? h(ProgressBlock, { state, onPause: () => source.pause?.(), onResume: () => source.resume?.(), onStop }) : null,
           state.status === DONE ? h(ResultBlock, { state, filter, onFilter: setFilter, expanded, onToggle }) : null,
-          busy && state.counts.candidates > 0
-            ? h(ResultBlock, { state, filter, onFilter: setFilter, expanded, onToggle })
-            : null,
         );
       }
 
@@ -1130,6 +1282,13 @@ window.__ModuleLoader__.load({
       const foot = h(
         'div',
         { className: 'tp-foot' },
+        done
+          ? h(
+              'button',
+              { type: 'button', className: 'tp-link', onClick: () => { setForceEmpty(true); setExpanded(null); setFilter(FILTER_ALL); } },
+              '换文件',
+            )
+          : null,
         done ? h('button', { type: 'button', className: 'tp-link', onClick: onStart }, '重新检查') : null,
         h('span', { className: 'tp-foot-note' }, '修订只写进副本，原文件不改'),
         h(
@@ -1218,7 +1377,6 @@ window.__ModuleLoader__.load({
           { className: 'tp-card-head' },
           h('span', { className: 'tp-card-title' }, '错别字检查'),
           h('span', { className: 'tp-card-file', title: meta.file }, String(meta.file ?? '')),
-          meta.demo === true ? h('span', { className: 'tp-card-tag' }, '演示数据') : null,
         ),
         h(
           'div',
@@ -1271,15 +1429,12 @@ window.__ModuleLoader__.load({
       /**
        * 注册面板与工具卡片。
        * @param {object} ctx - 宿主上下文。
-       * @param {object} [config] - 插件配置：`{ demo?: boolean, demoPreload?: string }`。
+       * @param {object} [config] - 插件配置（保留参数，数据源固定走 /typo-proof）。
        */
       apply(ctx, config) {
         ctx.effect(() => ensureStyle(), 'typo-proof: styles');
 
-        const demo = config !== null && typeof config === 'object' && config.demo === true;
-        const source = demo
-          ? createDemoSource({ preload: config?.demoPreload })
-          : createHttpSource(config ?? {});
+        const source = createHttpSource(config ?? {});
 
         ctx.slots.inject('tool.call.toolview', () => {
           // 卡片上的“在右侧栏查看”要真的能打开面板：宿主只给工具视图传工具属性，
@@ -1331,15 +1486,11 @@ window.__ModuleLoader__.load({
         normalizeState,
         itemKey,
         viewOf,
-        shouldUseDemo,
-        createDemoSource,
+        dirOf,
         createHttpSource,
-        makeDemoState: demoState,
-        DEMO_ITEMS,
-        DEMO_META,
       },
       /** 预览页用的工厂：直接拿到组件，不必走一遍 apply。 */
-      __components: { PanelBody, ToolCard, IssueRow, EmptyState, ProgressBlock, ResultBlock },
+      __components: { PanelBody, ToolCard, IssueRow, EmptyState, ProgressBlock, ResultBlock, SettingsForm, FilePicker },
     };
   },
 });

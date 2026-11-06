@@ -84,3 +84,10 @@ test("candidates：一次采样改动超过 5 处作废（相似度还没跌破�
   assert.equal(result.ok, false);
   assert.equal(result.reason, "too-many-edits");
 });
+
+test("candidates：只采样一次时门槛跟着降，不能永远 0 条", () => {
+  // 门槛恒为 2 的话，samples=1 永远是「这本没有错别字」——比不检查更误导。
+  const { candidates, changedVotes } = buildCandidates(SENTENCE, ["我睡得很晚，他也睡的很晚。"]);
+  assert.equal(changedVotes, 1);
+  assert.deepEqual(candidates, [{ pos: 2, orig: "的", sugg: "得", votes: 1 }]);
+});

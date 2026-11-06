@@ -153,16 +153,20 @@
       /*__CLIENT_SOURCE__*/
     </script>
     <script>
+      /*__FAKE_SOURCE__*/
+    </script>
+    <script>
       (async () => {
         const params = new URLSearchParams(location.search);
-        const view = params.get('view') === 'card' ? 'card' : params.get('view') === 'panel' ? 'panel' : 'all';
+        const rawView = params.get('view');
+        const view = rawView === 'card' || rawView === 'panel' || rawView === 'settings' || rawView === 'picker' ? rawView : 'all';
         const stage = params.get('state') || 'done';
         const theme = params.get('theme') === 'light' ? 'light' : 'dark';
         document.body.dataset.theme = theme;
 
         const chat = document.getElementById('chat');
         const side = document.getElementById('side');
-        if (view === 'panel') chat.hidden = true;
+        if (view === 'panel' || view === 'settings' || view === 'picker') chat.hidden = true;
         if (view === 'card') side.hidden = true;
 
         const React = window.React;
@@ -188,19 +192,66 @@
           sidebarRightTabs: { register: () => () => {} },
           logger: console,
         };
-        plugin.apply(ctx, { demo: true, demoPreload: stage });
+        plugin.apply(ctx, {});
 
-        if (view !== 'card') {
-          const Panel = captured['sidebar.right.pane.tab:@local/typo-proof'];
+        const pane = document.getElementById('pane');
+        if (view === 'settings') {
+          const { SettingsForm } = plugin.__components;
+          const config = {
+            file: 'C:\\Users\\autod\\OneDrive\\旧事重提\\日记\\2011~2014.docx',
+            localProvider: 'qwen-4b',
+            localModel: 'qwen3.5_4b',
+            reviewProvider: 'deepseek-official',
+            reviewModel: 'deepseek-flash',
+            minHanzi: 8,
+            samples: 3,
+            concurrency: 3,
+          };
+          const providers = [
+            { id: 'qwen-4b', models: ['qwen3.5_4b'] },
+            { id: 'deepseek-official', models: ['deepseek-flash'] },
+          ];
+          ReactDOM.createRoot(pane).render(
+            h(SettingsForm, { config, providers, error: '', saving: false, onSave: () => {}, onCancel: () => {} }),
+          );
+        } else if (view === 'picker') {
+          const { FilePicker } = plugin.__components;
+          const dirs = [
+            { name: '2011~2014', path: 'C:\\日记\\2011~2014' },
+            { name: '旧事重提', path: 'C:\\日记\\旧事重提' },
+            { name: '图片', path: 'C:\\日记\\图片' },
+          ];
+          const files = [
+            { name: '2011~2014.docx', path: 'C:\\日记\\2011~2014.docx', size: 2774528 },
+            { name: '2015.docx', path: 'C:\\日记\\2015.docx', size: 1942883 },
+            { name: '2016.docx', path: 'C:\\日记\\2016.docx', size: 2011130 },
+          ];
+          ReactDOM.createRoot(pane).render(
+            h(FilePicker, {
+              view: { dir: 'C:\\Users\\autod\\OneDrive\\旧事重提\\日记', parent: 'C:\\Users\\autod\\OneDrive\\旧事重提', dirs, files, error: '', loading: false },
+              onOpen: () => {},
+              onPick: () => {},
+              onCancel: () => {},
+            }),
+          );
+        } else if (view !== 'card') {
+          // 插件本体已经没有演示模式，预览页直接把假数据源塞给组件。
+          const Panel = plugin.__components.PanelBody;
           const expand = params.get('expand');
-          ReactDOM.createRoot(document.getElementById('pane')).render(
-            h(Panel, { sessionId: 'preview', initialExpanded: expand === null ? undefined : expand }),
+          ReactDOM.createRoot(pane).render(
+            h(Panel, {
+              sessionId: 'preview',
+              source: createFakeSource({ preload: stage }),
+              initialExpanded: expand === null ? undefined : expand,
+            }),
           );
         }
 
+
+
         if (view !== 'panel') {
           const { ToolCard } = plugin.__components;
-          const { DEMO_META, DEMO_ITEMS, countStates } = plugin.__test;
+          const { countStates } = plugin.__test;
           const counts = countStates(DEMO_ITEMS);
           const block =
             stage === 'running'

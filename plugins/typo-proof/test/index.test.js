@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 
-import { apply, completeText, createHandlers, describeProviders, normalizeConfig, panelState, reviewToState, sameOrigin, toItems } from "../index.js";
+import { apply, completeText, createHandlers, describeProviders, listDirectory, mergeConfig, normalizeConfig, panelState, reviewToState, sameOrigin, toItems } from "../index.js";
 
 /**
  * 造一个只会吐固定片段的 llm 服务。
@@ -129,48 +132,49 @@ test("host：模型列表拼成人话，拿不到就说拿不到", async () => {
 });
 
 
+/**
+ * 造一个够用的 req：能异步迭代，读得到 body。
+ * @param {string} method - 方法。
+ * @param {string} url - 路径。
+ * @param {unknown} [body] - JSON 体。
+ * @returns {object} 假请求。
+ */
+function fakeReq(method, url, body) {
+  const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
+  return {
+    method,
+    url,
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) yield chunk;
+    },
+  };
+}
+
+/** 造一个只记状态与响应体的 res。 */
+function fakeRes() {
+  return {
+    status: 0,
+    payload: null,
+    writeHead(status) {
+      this.status = status;
+    },
+    end(body) {
+      this.payload = JSON.parse(body);
+    },
+  };
+}
+
 test("host：/action start 会等 async 的 start，失败时把原因回给面板", async () => {
-  /**
-   * 造一个够用的 req：能异步迭代，读得到 body。
-   * @param {string} method - 方法。
-   * @param {string} url - 路径。
-   * @param {unknown} [body] - JSON 体。
-   * @returns {object} 假请求。
-   */
-  function fakeReq(method, url, body) {
-    const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
-    return {
-      method,
-      url,
-      async *[Symbol.asyncIterator]() {
-        for (const chunk of chunks) yield chunk;
-      },
-    };
-  }
-
-  /** 造一个只记状态与响应体的 res。 */
-  function fakeRes() {
-    return {
-      status: 0,
-      payload: null,
-      writeHead(status) {
-        this.status = status;
-      },
-      end(body) {
-        this.payload = JSON.parse(body);
-      },
-    };
-  }
-
   const jobs = { current: () => null, byId: () => null, pause: () => false, resume: () => false, stop: () => false };
-  const handlers = createHandlers({ jobs, config: normalizeConfig({}), start: async () => ({ id: "job-9" }) });
+  const configFor = async () => normalizeConfig({});
+  const handlers = createHandlers({ jobs, configFor, start: async () => ({ id: "job-9" }) });
 
   const ok = fakeRes();
   await handlers(fakeReq("POST", "/typo-proof/action", { action: "start" }), ok);
   assert.equal(ok.status, 200);
   assert.equal(ok.payload.jobId, "job-9");
 
-  const bad = createHandlers({ jobs, config: normalizeConfig({}), start: async () => { throw new Error("还没配本地模型"); } });
+  const bad = createHandlers({ jobs, configFor, start: async () => { throw new Error("还没配本地模型"); } });
   const res = fakeRes();
   await bad(fakeReq("POST", "/typo-proof/action", { action: "start" }), res);
   assert.equal(res.status, 400);
@@ -182,6 +186,16 @@ test("host：/action start 会等 async 的 start，失败时把原因回给面�
   assert.equal(statusRes.payload.status, "idle");
 });
 
+test("host：面板存的空串不覆盖 Loader 里的默认值", () => {
+  const loader = { file: "C:/日记/2011~2014.docx", localProvider: "qwen-4b", localModel: "qwen3.5_4b", reviewProvider: "deepseek-official", reviewModel: "deepseek-flash" };
+  // 旧版面板曾把空文件路径写进 settings.json，结果配置里的 docx 被静默清空。
+  const merged = mergeConfig(loader, { file: "", localProvider: "", localModel: "" });
+  assert.equal(merged.file, "C:/日记/2011~2014.docx");
+  assert.equal(merged.localModel, "qwen3.5_4b");
+  // 复核模型留空是有意义的（= 不做云端复核），必须让它生效。
+  assert.equal(mergeConfig(loader, { reviewModel: "" }).reviewModel, "");
+});
+
 test("host：跨站请求被挡在门外，同源与直接访问放行", () => {
   assert.equal(sameOrigin({ headers: {} }), true, "直接输地址没有 Origin");
   assert.equal(sameOrigin({ headers: { origin: "https://dsh-nas.fshake.com", host: "dsh-nas.fshake.com" } }), true);
@@ -189,6 +203,57 @@ test("host：跨站请求被挡在门外，同源与直接访问放行", () => {
   assert.equal(sameOrigin({ headers: { "sec-fetch-site": "cross-site", host: "dsh-nas.fshake.com" } }), false);
   assert.equal(sameOrigin({ headers: { origin: "不是个地址", host: "x" } }), false);
   assert.equal(sameOrigin({ headers: { origin: "https://a.example" } }), false, "有 Origin 没 Host 也不放行");
+});
+
+test("host：/config 能读能写，写坏了给可读错误；/providers 给结构化清单", async () => {
+  const saved = [];
+  const jobs = { current: () => null, byId: () => null, pause: () => false, resume: () => false, stop: () => false };
+  const config = { ...normalizeConfig({ file: "C:/日记/a.docx" }), settingsPath: "C:/用户/settings.json" };
+  const handlers = createHandlers({
+    jobs,
+    configFor: async () => config,
+    start: async () => ({ id: "job-1" }),
+    saveSettings: async (patch) => {
+      saved.push(patch);
+      if (patch.minHanzi === 0) return { ok: false, settings: {}, errors: ["minHanzi 要是 1 到 100 之间的整数"] };
+      return { ok: true, settings: patch, errors: [] };
+    },
+    providers: async () => [{ id: "lmstudio", models: ["qwen3-4b"] }],
+  });
+
+  const read = fakeRes();
+  await handlers(fakeReq("GET", "/typo-proof/config"), read);
+  assert.equal(read.status, 200);
+  assert.equal(read.payload.config.file, "C:/日记/a.docx");
+  assert.equal(read.payload.settingsPath, "C:/用户/settings.json");
+
+  const rejected = fakeRes();
+  await handlers(fakeReq("POST", "/typo-proof/config", { minHanzi: 0 }), rejected);
+  assert.equal(rejected.status, 400);
+  assert.match(rejected.payload.error, /minHanzi/);
+
+  const accepted = fakeRes();
+  await handlers(fakeReq("POST", "/typo-proof/config", { minHanzi: 12 }), accepted);
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.payload.ok, true);
+  assert.deepEqual(saved, [{ minHanzi: 0 }, { minHanzi: 12 }]);
+
+  const providers = fakeRes();
+  await handlers(fakeReq("GET", "/typo-proof/providers"), providers);
+  assert.equal(providers.status, 200);
+  assert.deepEqual(providers.payload.providers, [{ id: "lmstudio", models: ["qwen3-4b"] }]);
+});
+
+test("host：面板里存的值盖过 Loader 配置，没存的沿用 Loader", () => {
+  const loaderConfig = { file: "C:/a.docx", localProvider: "lmstudio", localModel: "", minHanzi: 8 };
+  const merged = mergeConfig(loaderConfig, { localModel: "qwen3-4b", minHanzi: 12 });
+  assert.equal(merged.localModel, "qwen3-4b", "面板里填的模型要生效");
+  assert.equal(merged.minHanzi, 12);
+  assert.equal(merged.file, "C:/a.docx", "面板没碰的字段沿用 Loader");
+  assert.equal(merged.localProvider, "lmstudio");
+
+  // 面板里存了空串 = 「这项没改过」，回落到 Loader；不然一次误存就把配置清空了。
+  assert.equal(mergeConfig({ localModel: "x" }, { localModel: "" }).localModel, "x");
 });
 
 test("host：apply 把工具与路由都注册上", () => {  const tools = [];
@@ -229,3 +294,21 @@ test("host：apply 把工具与路由都注册上", () => {  const tools = [];
   assert.equal(typeof routes[0].handler, "function");
 });
 
+
+
+test("host：列目录只给子目录与 .docx，隐藏文件与别的类型都不列", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "typo-files-"));
+  await mkdir(join(dir, "子目录"));
+  await writeFile(join(dir, "a.docx"), "x");
+  await writeFile(join(dir, "b.txt"), "x");
+  await writeFile(join(dir, ".hidden.docx"), "x");
+
+  const listing = await listDirectory(dir);
+  assert.deepEqual(listing.files.map((file) => file.name), ["a.docx"], "只有 .docx 该出现；.txt 与点开头的文件都不列");
+  assert.deepEqual(listing.dirs.map((entry) => entry.name), ["子目录"]);
+  assert.equal(listing.dir, resolve(dir), "回显的目录要是规范化后的绝对路径");
+  assert.equal(listing.parent, dirname(resolve(dir)), "上一级要能直接拿去打开");
+  assert.ok(listing.files[0].path.endsWith("a.docx"));
+
+  await assert.rejects(() => listDirectory(join(dir, "不存在")), /读不了这个目录/);
+});

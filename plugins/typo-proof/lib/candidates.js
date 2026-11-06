@@ -93,7 +93,10 @@ export function buildCandidates(sentence, samples) {
   const original = sentence.text;
   const evaluated = samples.map((raw) => evaluateSample(original, raw));
   const changedVotes = evaluated.filter((item) => item.ok && item.edits.length > 0).length;
-  if (changedVotes < MIN_VOTES) return { candidates: [], changedVotes, samples: evaluated };
+  // 门槛不能高于实际采样次数：samples=1 时门槛恒为 2，整本文档会「0 条可疑」，
+  // 用户以为没有错别字，实际是一次都没能凑够票。
+  const required = Math.min(MIN_VOTES, Math.max(1, evaluated.length));
+  if (changedVotes < required) return { candidates: [], changedVotes, samples: evaluated };
 
   const tally = new Map();
   for (const item of evaluated) {

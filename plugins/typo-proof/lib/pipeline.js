@@ -22,6 +22,17 @@ import { readZip } from "./zip.js";
 const MAX_CONSECUTIVE_FAILURES = 3;
 
 /**
+ * 用户点了停止时抛的那个错误。
+ *
+ * 要和其他失败分开：中止会打断正在跑的模型调用，那些调用抛出来的也是异常，
+ * 混在一起就会把「你自己按了停止」报成「连不上本地模型」。
+ * @returns {Error} 带 code 的异常。
+ */
+export function abortedError() {
+  return Object.assign(new Error("已中断"), { code: "aborted" });
+}
+
+/**
  * 限并发地跑一组任务，保持结果顺序。
  *
  * 任何一个任务抛错就立刻收手：其余并发槽位在下一次循环时看到 stopped 就退出。
@@ -182,7 +193,8 @@ export async function runCheck(options) {
     results = await mapLimit(sentences, concurrency, async (sentence) => {
     if (signal?.aborted === true) return { sentence, outputs: [], candidates: [], changedVotes: 0, error: "aborted" };
     await gate();
-    const key = cacheKey({ model: localModel, promptVersion: PROMPT_VERSION, text: sentence.text });
+    // samples 要进键：改成 5 次之后命中 3 次的旧缓存，票数与报告口径都会错。
+      const key = cacheKey({ model: `${localModel}#${samples}`, promptVersion: PROMPT_VERSION, text: sentence.text });
     const cached = await cache.get(key);
     let outputs = cached !== null && Array.isArray(cached.outputs) ? cached.outputs : null;
 
@@ -195,6 +207,8 @@ export async function runCheck(options) {
           outputs.push(await client.complete({ system, messages, temperature: 0.7, signal }));
           consecutiveFailures = 0;
         } catch (error) {
+          // 用户按了停止：这不是「连不上模型」，立刻按中断处理，别等凑满三次失败。
+          if (signal?.aborted === true || error?.code === "aborted") throw abortedError();
           allOk = false;
           sampleFailures += 1;
           consecutiveFailures += 1;
@@ -226,7 +240,7 @@ export async function runCheck(options) {
 
   // 先落盘再判中断：中断那条路同样要留下已完成的句子。
   await cache.flush();
-  if (signal?.aborted === true) throw new Error("已中断");
+  if (signal?.aborted === true) throw abortedError();
 
   const candidates = [];
   for (const result of results) {
@@ -272,7 +286,7 @@ export async function runCheck(options) {
     });
   });
 
-  if (signal?.aborted === true) throw new Error("已中断");
+  if (signal?.aborted === true) throw abortedError();
 
   emit({ phase: "writing", processed: candidates.length, total: candidates.length, ...scope });
 

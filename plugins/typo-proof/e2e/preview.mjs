@@ -62,10 +62,13 @@ function compose(react) {
     `<script src="${toUrl(react.reactDom)}"></script>`,
   ].join('\n    ');
   const source = readFileSync(clientPath, 'utf8');
+  // 预览专用的假数据源：去掉 export，直接当页面里的脚本用。
+  const fake = readFileSync(join(here, 'fake-source.js'), 'utf8').replace('export function createFakeSource', 'function createFakeSource');
   const template = readFileSync(templatePath, 'utf8');
   const html = template
     .replace('<!--__REACT__-->', () => scripts)
-    .replace('/*__CLIENT_SOURCE__*/', () => source);
+    .replace('/*__CLIENT_SOURCE__*/', () => source)
+    .replace('/*__FAKE_SOURCE__*/', () => fake);
   mkdirSync(outDir, { recursive: true });
   const path = join(outDir, 'index.html');
   writeFileSync(path, html, 'utf8');
@@ -133,9 +136,11 @@ const SHOTS = [
   { name: 'panel-idle', size: { width: 420, height: 720 }, query: 'view=panel&state=idle&theme=dark' },
   { name: 'panel-running', size: { width: 420, height: 760 }, query: 'view=panel&state=running&theme=dark' },
   { name: 'panel-done', size: { width: 420, height: 960 }, query: 'view=panel&state=done&theme=dark' },
-  { name: 'panel-expanded', size: { width: 420, height: 960 }, query: 'view=panel&state=done&theme=dark&expand=74' },
+  { name: 'panel-expanded', size: { width: 420, height: 960 }, query: 'view=panel&state=done&theme=dark&expand=74-0' },
   { name: 'panel-done-light', size: { width: 420, height: 960 }, query: 'view=panel&state=done&theme=light' },
   { name: 'panel-autostart', size: { width: 420, height: 960 }, query: 'view=panel&state=idle&theme=dark&auto=start' },
+  { name: 'panel-settings', size: { width: 420, height: 860 }, query: 'view=settings&theme=dark' },
+  { name: 'panel-picker', size: { width: 420, height: 760 }, query: 'view=picker&theme=dark' },
   { name: 'tool-card', size: { width: 760, height: 220 }, query: 'view=card&state=done&theme=dark' },
 ];
 
