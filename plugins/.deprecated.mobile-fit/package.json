@@ -1,6 +1,6 @@
 {
   "name": "@local/mobile-fit",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "exports": {
@@ -28,7 +28,11 @@
         "@deepseek-ai/dsh-client-ui-sidebar"
       ]
     }
-  }
+  },
+  "scripts": {
+    "test": "node --test test/client.test.js"
+  },
+  "license": "MIT"
 }
 
 

@@ -410,22 +410,101 @@ window.__ModuleLoader__.load({
       return dx > 0 ? 'open-left' : null;
     }
 
-    /** Horizontal scrollers keep their own drags: code blocks, tables, rails. */
-    function startsInHorizontalScroller(target) {
+    /** 横向滚动区的最小可滚动量（px）；不到这个量的容器按「放得下」处理。 */
+    const SCROLL_MIN = 2;
+    /** 代滚的起手位移（px）：小于它的横向抖动不该把表格蹭歪。 */
+    const DRAG_MIN = 8;
+    /** 代滚要求横向明显压过纵向，竖向滚页面时不要误拖表格。 */
+    const DRAG_DOMINANCE = 1.2;
+
+    /**
+     * 这一层算哪种横向滚动区。
+     * `auto`/`scroll` 直接算；`hidden` 只认**自己就是表格外面那一层包装**的容器：
+     * 宿主的宽表格（`md-table-wide`）就是用 hidden 藏滚动条、hover/focus 时才放开。
+     * 光「里面某处有表格」不算——消息列、会话区这类祖先也包含表格，认了就会一滑
+     * 把整个聊天区拖着走。
+     * @param node - 待判断的祖先元素。
+     * @returns `native`（浏览器自己滚）、`drag`（由本插件代滚），或 null。
+     */
+    function horizontalScrollerKind(node) {
+      const overflowX = window.getComputedStyle(node).overflowX;
+      if (overflowX === 'auto' || overflowX === 'scroll') return 'native';
+      if (overflowX !== 'hidden') return null;
+      /* 比屏幕还宽的容器是布局/裁切用的，不是表格包装。 */
+      if (node.clientWidth > window.innerWidth) return null;
+      return node.querySelector(':scope > table') !== null ? 'drag' : null;
+    }
+
+    /**
+     * 收集手指按下位置往上每一层横向滚动区。
+     * 每项记下按下时的 scrollLeft：移动时据此判断它有没有真的替用户滚、还留不留余量。
+     * 不设层数上限——表格里嵌着链接/代码，外面还可能套好几层布局容器。
+     * @param target - 触摸起点命中的节点。
+     * @returns 从内到外的滚动区列表；外壳框架之外的内容不归它管。
+     */
+    function horizontalScrollersOf(target) {
+      const scrollers = [];
       let node = target instanceof Element ? target : null;
-      for (let depth = 0; node !== null && depth < 6; depth += 1) {
-        if (node.scrollWidth > node.clientWidth + 1) {
-          const overflowX = window.getComputedStyle(node).overflowX;
-          if (overflowX === 'auto' || overflowX === 'scroll') return true;
+      while (node !== null) {
+        if (node.hasAttribute(FRAME_ATTRIBUTE)) break;
+        if (node.scrollWidth - node.clientWidth > SCROLL_MIN) {
+          const kind = horizontalScrollerKind(node);
+          if (kind !== null) {
+            scrollers.push({ node, left: node.scrollLeft, hidden: kind === 'drag', dragging: false });
+          }
         }
         node = node.parentElement;
+      }
+      return scrollers;
+    }
+
+    /**
+     * 这次位移该不该由滚动区消化。按「按下那一刻的余量」定：容器已经跟着动过
+     * （原生滚动在跑），或它那个方向还留有余量，就归它；已经滚到头就留给抽屉。
+     * 一次手势只归一个对象——归了滚动区就整段归它，中途滚到头也不换手（否则
+     * 拖着拖着突然弹出抽屉）。
+     * @param scrollers - 按下时收集的滚动区。
+     * @param dx - 相对起点的横向位移。
+     * @returns 是否归滚动区。
+     */
+    function scrollsBy(scrollers, dx) {
+      for (const scroller of scrollers) {
+        if (Math.abs(scroller.node.scrollLeft - scroller.left) > SCROLL_MIN) return true;
+        const room = scroller.node.scrollWidth - scroller.node.clientWidth;
+        if (room <= SCROLL_MIN) continue;
+        const can = dx > 0
+          ? scroller.node.scrollLeft > SCROLL_MIN
+          : scroller.node.scrollLeft < room - SCROLL_MIN;
+        if (can) return true;
+      }
+      return false;
+    }
+
+    /**
+     * overflow-x 为 hidden 的容器浏览器不会替用户滚，这里跟着手指写 scrollLeft。
+     * 内层若有可原生滚动的容器就交给浏览器，别叠成双倍位移。
+     * @param scrollers - 按下时收集的滚动区。
+     * @param dx - 相对起点的横向位移。
+     * @returns 是否真的代滚了（用来让后续移动继续跟着这个方向走）。
+     */
+    function dragHiddenScroller(scrollers, dx) {
+      for (const scroller of scrollers) {
+        if (!scroller.hidden) return false;
+        /* 动了但不是我滚的（比如 hover 把 overflow 放开、浏览器自己滚上了）：别叠加。 */
+        if (!scroller.dragging && Math.abs(scroller.node.scrollLeft - scroller.left) > SCROLL_MIN) return false;
+        const room = scroller.node.scrollWidth - scroller.node.clientWidth;
+        scroller.node.scrollLeft = Math.max(0, Math.min(room, scroller.left - dx));
+        scroller.dragging = true;
+        return true;
       }
       return false;
     }
 
     /**
      * 窄屏触摸导航：左半屏向右滑展开左抽屉，右半屏向左滑展开右抽屉，抽屉开着时
-     * 反向滑动收起。监听一律 passive，不取消滚动。
+     * 反向滑动收起。横向滚动区（表格、代码块）优先：起手时它那个方向还有余量，
+     * 这一次手势就整段归它，抽屉不参与（中途滚到头也不换手，免得拖到一半弹出
+     * 抽屉）；起手时已经滚到头，手势才归抽屉。监听一律 passive，不取消滚动。
      * 抽屉状态在手势发生的瞬间现读，不用渲染时的快照——否则刚收起就反向滑动会
      * 撞上还没刷新的旧状态。
      * @param enabled - 窄屏布局是否生效。
@@ -445,25 +524,51 @@ window.__ModuleLoader__.load({
           const target = event.target;
           if (target instanceof Element) {
             if (target.closest('input, textarea, [contenteditable="true"]') !== null) return;
-            if (startsInHorizontalScroller(target)) return;
           }
           const touch = event.touches[0];
-          start = { startX: touch.clientX, x: touch.clientX, y: touch.clientY, at: Date.now() };
+          start = {
+            startX: touch.clientX,
+            x: touch.clientX,
+            y: touch.clientY,
+            at: Date.now(),
+            /* 这次手势沿途可能横滚的容器，以及它们按下时的位置。 */
+            scrollers: horizontalScrollersOf(target),
+            /* 判给滚动区之后，这一次手势余下的部分不再看抽屉。 */
+            claimed: false,
+            /* 手指已经从横向拖动起步，之后横向分量变弱也继续跟着走。 */
+            dragging: false,
+          };
         };
         const onMove = (event) => {
           if (start === null || event.touches.length !== 1) return;
           const touch = event.touches[0];
+          const dx = touch.clientX - start.x;
+          const dy = touch.clientY - start.y;
+          /* 在表格/代码块里横着走：先滚它。宿主的宽表格靠 hidden 藏滚动条，
+             浏览器不会替它滚，这里补上。起手几像素的抖动不算拖动——要横向明显
+             压过纵向才接管，接管后就一路跟着手指（竖向分量再变大也不半路撒手，
+             否则表格会停在歪掉的位置）。 */
+          const horizontal = Math.abs(dx) > DRAG_MIN && Math.abs(dx) > Math.abs(dy) * DRAG_DOMINANCE;
+          if (start.dragging || horizontal) {
+            start.dragging = dragHiddenScroller(start.scrollers, dx) || start.dragging;
+          }
+          if (start.claimed) return;
           const intent = swipeIntent(
             {
               startX: start.startX,
-              dx: touch.clientX - start.x,
-              dy: touch.clientY - start.y,
+              dx,
+              dy,
               dt: Date.now() - start.at,
             },
             readFrame,
             window.innerWidth,
           );
           if (intent === null) return;
+          /* 还有余量的滚动区优先：这一滑是滚表格，不开抽屉。 */
+          if (scrollsBy(start.scrollers, dx)) {
+            start.claimed = true;
+            return;
+          }
           start = null;
           runRef.current(intent);
         };
@@ -618,6 +723,15 @@ window.__ModuleLoader__.load({
 
     return {
       inject: ['slots', 'locale', 'layout'],
+      /** 手势判定的纯函数与钩子，只给单测用；宿主不读这个字段。 */
+      internals: {
+        swipeIntent,
+        horizontalScrollerKind,
+        horizontalScrollersOf,
+        scrollsBy,
+        dragHiddenScroller,
+        useSwipeGesture,
+      },
       apply(ctx) {
         drawers.toggleLeft = () => {
           ctx.layout.toggleSidebar();
