@@ -1,5 +1,9 @@
 # mux-deflate
 
+> **⚠️ 已停用（2026-11-06）**：DSH 0.2.2 起默认开启 `websocketCompression`（`permessage-deflate`，
+> level 1），插件不再是补丁、反而会把用户关掉的压缩强行打开。目录已重命名为
+> `.deprecated.mux-deflate`，不再装进 profile。以下内容仅作历史记录。
+
 给 `/api/remote.mux` 的 WebSocket 打开 `permessage-deflate`，让会话内容不再以**未压缩的** JSON 穿过隧道。
 
 只压缩，不加密：握手双方仍能还原正文，这跟 TLS 或鉴权是两件事。
@@ -73,7 +77,7 @@ dsh 启动
 ## 测量
 
 ```powershell
-node plugins/mux-deflate/scripts/measure-wire.mjs `
+node plugins/.deprecated.mux-deflate/scripts/measure-wire.mjs `
   --url "http://127.0.0.1:8791/?token=..." `
   --session <sessionId> --label A-开
 ```
@@ -96,4 +100,4 @@ node plugins/mux-deflate/scripts/measure-wire.mjs `
 服务端压缩的代价：一条 2.2 MB 的帧，进程内**第一次**压缩约 500 ms（zlib 预热），
 之后稳定在约 95 ms。默认阈值 1024 让大量小的 assistant 增量帧不被压缩。
 
-原始数据在 `plugins/mux-deflate/.measure/`（已 gitignore）。
+原始数据在 `plugins/.deprecated.mux-deflate/.measure/`（已 gitignore）。

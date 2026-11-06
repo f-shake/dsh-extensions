@@ -1,7 +1,7 @@
 // 在 socket 层量「打开一个会话」到底传了多少字节：会话首包走 WebSocket，
 // HTTP 层的字节统计看不到它，压缩（permessage-deflate）也只体现在这里。
 //
-//   node plugins/mux-deflate/scripts/measure-wire.mjs \
+//   node plugins/.deprecated.mux-deflate/scripts/measure-wire.mjs \
 //     --url "http://127.0.0.1:8791/?token=..." \
 //     --session session-800cb75e-... \
 //     [--label 名字] [--max-messages 500] [--min-messages 50] [--json 输出路径]
@@ -167,7 +167,7 @@ async function measure(options) {
 const args = parseArgs(process.argv.slice(2));
 if (typeof args.url !== "string" || typeof args.session !== "string") {
   console.error(
-    '用法: node plugins/mux-deflate/scripts/measure-wire.mjs --url "<带 token 的首页地址>" --session <sessionId> ' +
+    '用法: node plugins/.deprecated.mux-deflate/scripts/measure-wire.mjs --url "<带 token 的首页地址>" --session <sessionId> ' +
       "[--label 名字] [--max-messages 500] [--min-messages 50] [--min-turns 2] [--settle-ms 800] [--json 输出路径]",
   );
   process.exit(2);
