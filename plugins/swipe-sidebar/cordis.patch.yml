@@ -1,0 +1,4 @@
+# swipe-sidebar 的 Loader 行。
+- insert:
+    - id: swipe-sidebar
+      name: '@local/swipe-sidebar'
