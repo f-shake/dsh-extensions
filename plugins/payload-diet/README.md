@@ -4,6 +4,14 @@
 
 宿主侧插件（跑在 dsh 进程里），**不给客户端 bundle 增加任何一个字节**。
 
+> 2026-11-06：`/assets` 接管（`shellCache`）在**随包配置里关掉了**（代码默认值仍是
+> `true`，只关开关、不删代码）。dsh 0.2.2 的 `dsh-host-frontend-static` 自己会给静态资源
+> 写弱 ETag + `no-cache` 并响应 304，接管从「补上游缺失」变成了「遮蔽上游逻辑」。
+> 图外置与首屏收窄不受影响；需要 `immutable` 时把 `shellCache` 改回 `true` 即可。
+>
+> 注意范围：这个开关只影响**本仓库这份 `cordis.patch.yml`**。新建 profile 或另打的包
+> 如果没有抄这份 config，会按代码默认值 `true` 重新接管 `/assets`。
+
 ## 为什么
 
 2026-10-30 用 headless Edge + CDP 逐请求统计（gzip 开启、本机回环）得到的现状：
@@ -28,7 +36,7 @@
                                 │            把大图换成 /dsh-diet/asset/<sha256>
                                 ▼            结果按 URL 缓存（含 rev）
 浏览器 ─GET /dsh-diet/asset/<f> ──► 本插件：内容寻址的内存池，immutable
-浏览器 ─GET /assets/* ────────────► 本插件：只服务 <dist>/assets/ 子树，补 immutable/ETag
+浏览器 ─GET /assets/* ────────────► 本插件（可选，随包配置已关 shellCache）：只服务 <dist>/assets/ 子树，补 immutable/ETag
 ```
 
 三条必须守住的正确性约束：
@@ -57,7 +65,7 @@
         enabled: true              # false = 完全不注册路由与 tap，等价于未安装
         minAssetBytes: 2048        # 解码后小于它的图保持内联
         assetPoolBytes: 67108864   # 外置图片池上限（默认 64 MB）；池满时只跳过超限的那张图
-        shellCache: true           # 是否接管 /assets/* 补缓存头
+        shellCache: false          # 是否接管 /assets/* 补缓存头（随包配置已关，见文首说明；代码默认值 true）
         shellRoot: ''              # 可选，前端 dist 目录；留空则按 dsh-web-app 的锚点自动解析
         openWindow:                # 会话首次打开的窗口（收窄首屏，回补不受影响）
           enabled: true

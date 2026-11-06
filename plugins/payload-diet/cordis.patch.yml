@@ -4,4 +4,7 @@
       config:
         enabled: true
         minAssetBytes: 2048
-        shellCache: true
+        # 2026-11-06 起默认关：dsh 0.2.2 的 frontend-static 自己会给静态资源加弱
+        # ETag + no-cache/304，接管 /assets 已从「补缺失」变成「遮蔽官方逻辑」。
+        # 图外置那半（本插件的主要收益）不受影响。需要 immutable 时改成 true。
+        shellCache: false
