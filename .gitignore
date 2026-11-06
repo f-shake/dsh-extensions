@@ -13,6 +13,9 @@ plugins/payload-diet/.measure/
 # ---------- plugins/mux-deflate（量化探针的产物）----------
 plugins/mux-deflate/.measure/
 
+# ---------- plugins/typo-proof（设计预览的产物：拼好的页面与截图）----------
+plugins/typo-proof/e2e/.preview/
+
 # ---------- dsh-remote-android（Gradle / Android）----------
 .gradle/
 .kotlin/

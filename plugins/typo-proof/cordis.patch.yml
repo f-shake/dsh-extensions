@@ -1,0 +1,20 @@
+# typo-proof 的 Loader 行。
+#
+# `demo: true`：面板走内置演示数据（不需要后端，也不需要模型）。装好就能点通
+#   「开始检查 → 进度 → 结果 → 展开」。
+# 要跑真模型：把 demo 改成 false，填上 localProvider / localModel，
+#   并把 file 指到要检查的 docx。复核模型可以留空，留空时复核会用同一套 provider 参数
+#   （见 README「跑真的」一节）。
+- insert:
+    - id: typo-proof
+      name: '@local/typo-proof'
+      config:
+        demo: true
+        file: 'C:\Users\autod\OneDrive\旧事重提\日记\2011~2014.docx'
+        localProvider: lmstudio
+        localModel: ''
+        reviewProvider: deepseek-official
+        reviewModel: deepseek-flash
+        minHanzi: 8
+        samples: 3
+        concurrency: 3

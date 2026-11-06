@@ -1,0 +1,12 @@
+{
+  "source": "确认错别字_2011-2014.csv",
+  "note": "人工确认过的真错，用作管线的回归夹具。段号按 CSV 口径（从 1 开始）。present=false 的三条在 2026-11-06 这版 docx 里已经被改掉了（原错式在全文里 0 次），夹具保留它们是为了记录出处，不能再当成召回目标。",
+  "file": "C:/Users/autod/OneDrive/旧事重提/日记/2011~2014.docx",
+  "items": [
+    { "para": 208, "orig": "道", "sugg": "到", "pattern": "报道", "fixed": "报到", "present": true, "why": "“报道”应为“报到”（去学校报到）" },
+    { "para": 214, "orig": "拿", "sugg": "哪", "pattern": "坐在拿", "fixed": "坐在哪", "present": false, "why": "“坐在拿”应为“坐在哪”；这版 docx 里已经是“坐在哪”" },
+    { "para": 226, "orig": "腿", "sugg": "题", "pattern": "问腿", "fixed": "问题", "present": false, "why": "“问腿”应为“问题”；这版 docx 里已经是“问题”" },
+    { "para": 228, "orig": "备", "sugg": "别", "pattern": "特备", "fixed": "特别", "present": false, "why": "“特备”应为“特别”；这版 docx 里已经是“特别”" },
+    { "para": 229, "orig": "人", "sugg": "员", "pattern": "满人", "fixed": "满员", "present": true, "why": "“满人”应为“满员”（同段“1000人”不改）" }
+  ]
+}

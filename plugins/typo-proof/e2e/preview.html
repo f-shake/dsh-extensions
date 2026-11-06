@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>typo-proof 设计预览</title>
+    <style>
+      /*
+       * 这是设计评审用的页面外壳，不是插件的一部分。
+       * 只做两件事：把客户端的真实组件挂进一个像宿主的框里，
+       * 并给出宿主那套设计变量的近似值——真实值由 dsh 的 ui-theme 注入。
+       */
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        font-family: system-ui, 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+        background: #141518;
+      }
+      body[data-theme='light'] {
+        color-scheme: light;
+        background: #f5f6f8;
+      }
+      /* 宿主的深浅两套变量，取近似值；组件的 CSS 都带 fallback，缺变量也不会崩。 */
+      body {
+        --dsw-alias-bg-base: #1b1c1f;
+        --dsw-alias-bg-module-platform: #232529;
+        --dsw-alias-label-primary: #f2f3f5;
+        --dsw-alias-label-secondary: #b9bec7;
+        --dsw-alias-label-tertiary: #8a8f98;
+        --dsw-alias-border-l1: rgba(255, 255, 255, 0.08);
+        --dsw-alias-border-l2: rgba(255, 255, 255, 0.14);
+        /* 真实值：深色主题里 brand-primary 是近白（“高对比前景色”），不是蓝色。 */
+        --dsw-alias-brand-primary: #f9fafb;
+        --dsw-static-deepseek-500: #5686fe;
+        --dsw-alias-state-success-primary: #48b47f;
+        --dsw-alias-state-warn-primary: #d9a03c;
+        --dsw-alias-state-error-primary: #e05b5b;
+        --dsw-alias-code-diff-added: rgba(72, 180, 127, 0.16);
+        --dsw-alias-code-diff-deleted: rgba(224, 91, 91, 0.16);
+        --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, 0.07);
+        --dsw-specific-input-major: #202226;
+      }
+      body[data-theme='light'] {
+        --dsw-alias-bg-base: #ffffff;
+        --dsw-alias-bg-module-platform: #f7f8fa;
+        --dsw-alias-label-primary: #14181f;
+        --dsw-alias-label-secondary: #4b5563;
+        --dsw-alias-label-tertiary: #8a8f98;
+        --dsw-alias-border-l1: rgba(16, 24, 40, 0.06);
+        --dsw-alias-border-l2: rgba(16, 24, 40, 0.14);
+        --dsw-alias-brand-primary: #0f1115;
+        --dsw-static-deepseek-500: #4176e6;
+        --dsw-alias-state-success-primary: #2e7d32;
+        --dsw-alias-state-warn-primary: #b26a00;
+        --dsw-alias-state-error-primary: #d33;
+        --dsw-alias-code-diff-added: rgba(46, 125, 50, 0.14);
+        --dsw-alias-code-diff-deleted: rgba(211, 47, 47, 0.13);
+        --dsw-alias-interactive-bg-hover: rgba(16, 24, 40, 0.06);
+        --dsw-specific-input-major: #f2f3f5;
+      }
+
+      .app {
+        display: flex;
+        height: 100%;
+      }
+      .chat {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 18px 22px;
+        color: var(--dsw-alias-label-primary);
+      }
+      .chat[hidden],
+      .side[hidden] {
+        display: none;
+      }
+      .msg {
+        max-width: 640px;
+        font-size: 13px;
+        line-height: 1.6;
+        color: var(--dsw-alias-label-secondary);
+      }
+      .msg-user {
+        align-self: flex-end;
+        padding: 8px 12px;
+        border-radius: 12px;
+        background: var(--dsw-alias-bg-module-platform);
+        color: var(--dsw-alias-label-primary);
+      }
+      .side {
+        flex: 0 0 420px;
+        width: 420px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        border-left: 1px solid var(--dsw-alias-border-l1);
+        background: var(--dsw-alias-bg-base);
+        color: var(--dsw-alias-label-primary);
+      }
+      .side-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--dsw-alias-border-l1);
+        font-size: 12px;
+        color: var(--dsw-alias-label-tertiary);
+      }
+      .pane {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .pane > * {
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app" id="app">
+      <main class="chat" id="chat">
+        <div class="msg msg-user">看看这个月的日记有没有错别字</div>
+        <div id="card"></div>
+      </main>
+      <aside class="side" id="side">
+        <div class="side-head" id="side-head">右侧栏 · 错别字（设计预览）</div>
+        <div class="pane" id="pane"></div>
+      </aside>
+    </div>
+
+    <!--__REACT__-->
+    <script>
+      window.__ModuleLoader__ = {
+        load(module) {
+          window.__module = module;
+        },
+      };
+    </script>
+    <script>
+      /*__CLIENT_SOURCE__*/
+    </script>
+    <script>
+      (async () => {
+        const params = new URLSearchParams(location.search);
+        const view = params.get('view') === 'card' ? 'card' : params.get('view') === 'panel' ? 'panel' : 'all';
+        const stage = params.get('state') || 'done';
+        const theme = params.get('theme') === 'light' ? 'light' : 'dark';
+        document.body.dataset.theme = theme;
+
+        const chat = document.getElementById('chat');
+        const side = document.getElementById('side');
+        if (view === 'panel') chat.hidden = true;
+        if (view === 'card') side.hidden = true;
+
+        const React = window.React;
+        const ReactDOM = window.ReactDOM;
+        const h = React.createElement;
+        const require = (name) => (name === 'react' ? React : undefined);
+
+        const plugin = window.__module.factory(require);
+        const captured = {};
+        const ctx = {
+          effect(factory) {
+            factory();
+          },
+          slots: {
+            inject(_name, factory) {
+              factory();
+            },
+            register(spec, component) {
+              captured[`${spec.name}:${spec.key ?? spec.id ?? ''}`] = component;
+              return () => {};
+            },
+          },
+          sidebarRightTabs: { register: () => () => {} },
+          logger: console,
+        };
+        plugin.apply(ctx, { demo: true, demoPreload: stage });
+
+        if (view !== 'card') {
+          const Panel = captured['sidebar.right.pane.tab:@local/typo-proof'];
+          const expand = params.get('expand');
+          ReactDOM.createRoot(document.getElementById('pane')).render(
+            h(Panel, { sessionId: 'preview', initialExpanded: expand === null ? undefined : expand }),
+          );
+        }
+
+        if (view !== 'panel') {
+          const { ToolCard } = plugin.__components;
+          const { DEMO_META, DEMO_ITEMS, countStates } = plugin.__test;
+          const counts = countStates(DEMO_ITEMS);
+          const block =
+            stage === 'running'
+              ? { meta: { ...DEMO_META, ...counts } }
+              : { meta: { ...DEMO_META, ...counts } };
+          const card =
+            stage === 'idle'
+              ? h(ToolCard, { phase: 'call' })
+              : h(ToolCard, { phase: 'result', block });
+          ReactDOM.createRoot(document.getElementById('card')).render(card);
+        }
+
+        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+        // ?auto=start 从空态点一下“开始检查”，用来验证交互流程真的跑得通，
+        // 而不只是把某个中间状态静态画出来。
+        if (params.get('auto') === 'start') {
+          const button = document.querySelector('#pane .tp-btn[data-variant="primary"]');
+          if (button !== null) button.click();
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+
+        document.title = `typo-proof ${view}/${stage}/${theme}`;
+        document.body.dataset.ready = '1';
+      })().catch((error) => {
+        const pre = document.createElement('pre');
+        pre.textContent = String((error && error.stack) || error);
+        pre.style.color = '#e05b5b';
+        document.body.appendChild(pre);
+        document.title = 'PREVIEW ERROR';
+      });
+    </script>
+  </body>
+</html>
