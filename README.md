@@ -8,19 +8,22 @@ dsh-extensions/
 ├── dsh-auth/                  DSH 公网访问网关：密码 + TOTP 双因子（Python / FastAPI）
 ├── skills/                    vibe coding 系列技能（skill 源文件，同步到 ~/.dsh/skills 生效）
 └── plugins/                   DSH 客户端插件（Cordis bundle）
-    ├── mobile-fit/            窄屏适配：弹窗/设置面板不超屏
-    ├── header-compact/        窄屏标题行收紧：子智能体/后台任务文案缩短、隐藏手机端无用的「在本地打开」
     ├── session-activity-order/ 侧栏排序：活跃工作区/会话自动置顶
+    ├── header-compact/        窄屏标题行收紧：计数文案换短写法、隐藏手机端无用的「在本地打开」
     ├── composer-focus/        输入框交互：点按钮不拉键盘、滑聊天区收键盘、切会话不自动弹键盘
+    ├── swipe-sidebar/         窄屏手势：左半屏右滑开左抽屉、右半屏左滑开右侧栏、反向滑动收起
     ├── background-send/       插话即转后台：把前台命令转到后台，结果里说明是插话而非超时
-    ├── payload-diet/          宿主侧减负：外置 combo 里的内联图、给静态资源补缓存头、收窄会话首屏窗口
-    ├── mux-deflate/           宿主侧减负：给 /api/remote.mux 的 WebSocket 打开压缩
+    ├── payload-diet/          宿主侧减负：外置 combo 里的内联图、收窄会话首屏窗口（/assets 缓存头接管随包关闭）
     ├── deliver/               文件投递：宿主文件变成可下载的卡片，右侧栏带一个投递箱
     ├── vibe-phase-bar/        vibe coding 流程：输入框上方的五阶段条、加号右侧的显隐按钮、阶段二/四的选择弹框、阶段请求工具
     ├── git-panel/             右侧边栏的 Git 面板：选择子仓库、未提交文件分组与逐文件差异（只读）
-    ├── session-list-cache/    客户端减负：会话列表先用上次的结果出来，不等网络（**⛔ 不要启用，见其 README**）
-    └── external/              第三方插件源码（git 子模块，仓库里只有 commit 指针）
-        └── dsh-live-compact/  边做边压：不调模型的尾部小切压缩（MIT，上游 MerkyorLynn/dsh-live-compact）
+    ├── typo-proof/            日记错别字检查：本地模型采样、云端盲复核，确认的改动以修订模式写进 docx 副本
+    ├── external/              第三方插件源码（git 子模块，仓库里只有 commit 指针）
+    │   └── dsh-live-compact/  边做边压：不调模型的尾部小切压缩（MIT，上游 MerkyorLynn/dsh-live-compact）
+    └── .deprecated.*/         已停用的插件，代码保留备查，不装进 profile（见下文「已停用的插件」）
+        ├── .deprecated.mobile-fit/          窄屏适配：被 0.2.2 官方折叠侧栏取代
+        ├── .deprecated.mux-deflate/         宿主侧 WebSocket 压缩：官方默认开启
+        └── .deprecated.session-list-cache/  会话列表缓存：官方已优化列表加载，且它从启用起就标注「不要启用」
 ```
 
 各部件是独立的交付物，各有自己的构建方式和部署位置，只是一起做版本管理。
@@ -58,14 +61,15 @@ powershell -NoProfile -File .\start-auth.ps1     # 前台启动（调试）
 
 插件是 DSH 的 Cordis bundle，安装到 profile 里生效
 （profile 目录 `~/.dsh/profiles/<名>`，依赖写成 `link:` 指向本仓库的目录）。
-多数是客户端插件；宿主侧（跑在 dsh 进程里）有五个：`payload-diet` 接管 HTTP 路由与
-combo 改写、`mux-deflate` 接管 WebSocket 压缩、`background-send` 处理插话转后台、
+多数是客户端插件；宿主侧（跑在 dsh 进程里）有六个：`payload-diet` 接管 combo 改写
+（`/assets` 缓存头接管随包配置已关闭）、`background-send` 处理插话转后台、
 `vibe-phase-bar` 注册 `vibe_phase` 工具与 `/vibe-phase` 状态路由、`deliver` 注册
-`deliver` 工具与 `/deliver` 下载/投递箱路由。
+`deliver` 工具与 `/deliver` 下载/投递箱路由、`git-panel` 提供 `/git-panel` 只读查询、
+`typo-proof` 注册 `typo_check` 工具与 `/typo-proof` 任务路由。
 
 ```powershell
 # 以 profile aa 为例
-node C:\Running\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js plugin --profile aa add "@local/mobile-fit@link:<repo>/plugins/mobile-fit"
+node C:\Running\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js plugin --profile aa add "@local/deliver@link:<repo>/plugins/deliver"
 ```
 
 同时在 profile 的 `package.json` 的 `dsh.profile.bundles` 里加上包名，客户端才会加载。
@@ -73,9 +77,34 @@ node C:\Running\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js plugin --profile aa
 打包成可分发 tgz（`files` 字段只带运行必需的文件）：
 
 ```powershell
-cd plugins\mobile-fit
+cd plugins\deliver
 pnpm pack
 ```
+
+### 已停用的插件（`plugins\.deprecated.*`）
+
+停用但不想删代码的插件，目录重命名为 `.deprecated.<原名>`，包名保持不变。
+这样它们不会被误装、在编辑器里也和活跃插件分得开；恢复时把目录名改回去即可。
+
+| 插件 | 停用时间 | 停用原因 |
+|---|---|---|
+| `.deprecated.mobile-fit` | 2026-11-06 | DSH 0.2.2 官方内置窄屏抽屉（<768 抽屉 + 遮罩，<1024 自动收起），行为与插件一致 |
+| `.deprecated.mux-deflate` | 2026-11-06 | 官方 `websocketCompression` 默认 `deflate`，插件从补丁变成多余，且会把用户关掉的压缩强行打开 |
+| `.deprecated.session-list-cache` | 2026-11-06 | 该插件从设计起就标注「不要启用」（rpcId/缓存一致性风险）；0.2.2 官方进一步优化了大量会话的列表加载，缓存收益归零 |
+
+> `header-compact` 与 `composer-focus` 曾在同一天被停用，实测后当天恢复：
+> 官方的「溢出渐隐」在手机标题行上不如原插件的文案缩写干净；键盘方面官方只做了
+> 发送后收起，**点按钮不弹键盘**和**切会话不自动聚焦**两条仍然缺。
+> 结论：官方覆盖 ≠ 等价覆盖，停用前必须实机验证，不能只看 release note。
+
+恢复步骤（以 mobile-fit 为例）：
+
+1. `git mv plugins/.deprecated.mobile-fit plugins/mobile-fit`
+2. `dsh plugin --profile aa add "@local/mobile-fit@link:<repo>/plugins/mobile-fit"`
+3. 在 profile 的 `dsh.profile.bundles` 里加回 `@local/mobile-fit`
+4. 重启 dsh
+
+停用前请先读对应目录的 README——里面记录了它当年解决的问题，确认官方是否真的覆盖了。
 
 ### 第三方插件（plugins/external/）
 
@@ -131,3 +160,4 @@ dsh plugin --profile aa add "<上游真实包名>@link:<repo>/plugins/external/<
 - 三个部件版本号各自独立，不强行对齐
 - 提交信息按部件加前缀：`android:` / `auth:` / `plugin(mobile-fit):` 等
 - 任何密钥、口令、私钥、TOTP 二维码都不入库
+- 升级 DSH 前后的核对结论、已归档插件与验证清单见 [COMPAT.md](COMPAT.md)
