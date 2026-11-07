@@ -18,6 +18,7 @@ dsh-extensions/
     ├── vibe-phase-bar/        vibe coding 流程：输入框上方的五阶段条、加号右侧的显隐按钮、阶段二/四的选择弹框、阶段请求工具
     ├── git-panel/             右侧边栏的 Git 面板：选择子仓库、未提交文件分组与逐文件差异（只读）
     ├── typo-proof/            日记错别字检查：本地模型采样、云端盲复核，确认的改动以修订模式写进 docx 副本
+    ├── llm-retry-ladder/      模型请求重试：停用内置指数退避，改成分段阶梯（1s×5 → 2s×5 → 10s×100）
     ├── external/              第三方插件源码（git 子模块，仓库里只有 commit 指针）
     │   └── dsh-live-compact/  边做边压：不调模型的尾部小切压缩（MIT，上游 MerkyorLynn/dsh-live-compact）
     └── .deprecated.*/         已停用的插件，代码保留备查，不装进 profile（见下文「已停用的插件」）
@@ -61,11 +62,12 @@ powershell -NoProfile -File .\start-auth.ps1     # 前台启动（调试）
 
 插件是 DSH 的 Cordis bundle，安装到 profile 里生效
 （profile 目录 `~/.dsh/profiles/<名>`，依赖写成 `link:` 指向本仓库的目录）。
-多数是客户端插件；宿主侧（跑在 dsh 进程里）有六个：`payload-diet` 接管 combo 改写
+多数是客户端插件；宿主侧（跑在 dsh 进程里）有七个：`payload-diet` 接管 combo 改写
 （`/assets` 缓存头接管随包配置已关闭）、`background-send` 处理插话转后台、
 `vibe-phase-bar` 注册 `vibe_phase` 工具与 `/vibe-phase` 状态路由、`deliver` 注册
 `deliver` 工具与 `/deliver` 下载/投递箱路由、`git-panel` 提供 `/git-panel` 只读查询、
-`typo-proof` 注册 `typo_check` 工具与 `/typo-proof` 任务路由。
+`typo-proof` 注册 `typo_check` 工具与 `/typo-proof` 任务路由、`llm-retry-ladder`
+接管 `agent/request-error` 并把内置 `dsh-llm-retry` 停用。
 
 ```powershell
 # 以 profile aa 为例

@@ -1,0 +1,9 @@
+# 本插件接管模型请求重试，内置的指数退避插件必须关掉：
+# 两个策略都挂在 agent/request-error 上，同时启用会先走内置的 500ms 指数退避，
+# 把预算耗掉之后才轮到本插件，阶梯就形同虚设。
+- id: llm-retry
+  disabled: true
+
+- insert:
+    - id: llm-retry-ladder
+      name: '@local/llm-retry-ladder'

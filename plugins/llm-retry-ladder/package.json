@@ -1,0 +1,24 @@
+{
+  "name": "@local/llm-retry-ladder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "模型请求重试改成分段常量阶梯（1s×5 → 2s×5 → 10s×100），并停用内置的指数退避",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "license": "MIT"
+}
