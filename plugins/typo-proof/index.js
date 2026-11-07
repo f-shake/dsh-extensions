@@ -378,6 +378,27 @@ export async function listDirectory(dir) {
 }
 
 /**
+ * 在一级子目录里找同名文件，给「路径少写一层」这种情况兜底。
+ *
+ * 只找一层、只比文件名，不做模糊匹配：目的是把人指回那个明显的目录，
+ * 不是猜他想开哪个文件。
+ * @param {string} file - 找不到的那个路径。
+ * @returns {Promise<string>} 命中的候选路径；没找到返回空串。
+ */
+export async function suggestNeighbour(file) {
+  const base = basename(file);
+  const parent = dirname(file);
+  const entries = await readdir(parent, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const candidate = join(parent, entry.name, base);
+    const info = await stat(candidate).catch(() => null);
+    if (info !== null && info.isFile()) return candidate;
+  }
+  return "";
+}
+
+/**
  * 构造路由处理器。
  * @param {{ jobs: object, configFor: () => Promise<object>, start: (options: object) => Promise<object>, saveSettings?: (patch: object) => Promise<object>, providers?: () => Promise<object[]> }} deps - 依赖。
  * @returns {(req: object, res: object) => Promise<void>} 处理器。
@@ -592,7 +613,12 @@ export function apply(ctx, rawConfig) {
     // 先确认文件在，再把它记成「上次用的」：路径通常来自文件选择框，
     // 记不住的话每次打开面板都得重新点一遍。写进面板设置（用户目录），不进仓库。
     const info = await stat(file).catch(() => null);
-    if (info === null) throw new Error(`找不到文件：${file}`);
+    if (info === null) {
+      // 常见错法是漏了一层目录（…\旧事重提\2015.docx 而文件在 …\旧事重提\日记\里）。
+      // 顺手在隔壁文件夹里找同名文件，找到就直接指出来，省得人对着路径反复看。
+      const hint = await suggestNeighbour(file);
+      throw new Error(hint === "" ? `找不到文件：${file}` : `找不到文件：${file}\n隔壁目录里有同名的：${hint}`);
+    }
     if (!info.isFile()) throw new Error(`这不是一个文件：${file}`);
     await writeSettings(settingsPath, { file }).catch(() => {});
     if (config.localModel === "") {

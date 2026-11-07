@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { miniDocx } from "./fixtures/mini-docx.js";
 
-import { apply, completeText, createHandlers, describeProviders, listDirectory, mergeConfig, normalizeConfig, panelState, reviewToState, sameOrigin, toItems } from "../index.js";
+import { apply, completeText, createHandlers, describeProviders, listDirectory, mergeConfig, suggestNeighbour, normalizeConfig, panelState, reviewToState, sameOrigin, toItems } from "../index.js";
 
 /**
  * 造一个只会吐固定片段的 llm 服务。
@@ -331,4 +331,17 @@ test("host：开始一次检查前先确认文件存在，并把路径记进面�
   const { writeSettings, readSettings } = await import("../lib/settings.js");
   await writeSettings(settingsPath, { file });
   assert.equal((await readSettings(settingsPath)).file, file);
+});
+
+test("host：路径少写一层目录时，能指出隔壁的同名文件", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "typo-suggest-"));
+  await mkdir(join(dir, "日记"), { recursive: true });
+  await writeFile(join(dir, "日记", "2015.docx"), "x");
+  await writeFile(join(dir, "我的档案.docx"), "x");
+
+  const wrong = join(dir, "2015.docx");
+  assert.equal(await suggestNeighbour(wrong), join(dir, "日记", "2015.docx"));
+
+  // 隔壁没有同名文件就别乱猜。
+  assert.equal(await suggestNeighbour(join(dir, "不存在的.docx")), "");
 });
