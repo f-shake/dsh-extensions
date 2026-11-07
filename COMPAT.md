@@ -48,6 +48,7 @@ Start-ScheduledTask -TaskName DshRestartOnce   # 20 秒后停旧起新
 | `git-panel` | 双半边 | 独占，无冲突 |
 | `typo-proof` | 双半边 | 独占，`tools.register` 新签名兼容 |
 | `dsh-live-compact` 1.0.8 | 第三方 | `engines.dsh` 覆盖新版；侵入压缩内部，异常时优先怀疑它 |
+| `dsh-mnemon` 0.5.42 | 第三方 | `engines.dsh` 明确覆盖 0.2.2-rc.1（其 release note 也写了验证）；双半边，装完需重启。`pnpm peers check` 会报 cordis / typert-protocol / react 缺失，但宿主加载器能解析，实测工具与 Memory System 正常 |
 
 ## 官方已替代 / 已归档
 
@@ -104,7 +105,8 @@ Start-ScheduledTask -TaskName DshRestartOnce   # 20 秒后停旧起新
 5. 长命令 + 插话：命令转后台、进程不死、输出完整；
 6. 跑完一轮看侧栏是否抖动或错位（session-activity-order）；
 7. 手机：抽屉默认收起、左右滑动开合、标题行文案、键盘两条规则；
-8. 长对话确认自动压缩正常（dsh-live-compact）。
+8. 长对话确认自动压缩正常（dsh-live-compact）；
+9. 记忆：`mnemon_status` 返回 `healthy: true`，工具列表里有 `mnemon_runtime_memory`（dsh-mnemon）。
 
 ## 已知坑
 
@@ -112,5 +114,6 @@ Start-ScheduledTask -TaskName DshRestartOnce   # 20 秒后停旧起新
 - **token 轮换**：每次重启都换，书签要更新，URL 在 `aa.out.log`。
 - **插件目录改名要同步 profile 依赖**：`link:` 指向改名后的目录会变成悬空链接。
 - **pnpm remove 留悬空 junction**：`node_modules/@local/<name>` 会残留，要手动删。
-- **客户端插件改动不用重启**：bundle 带内容哈希 `&rev=`，刷新就换；有宿主半边的（`payload-diet`、`background-send`、`deliver`、`git-panel`、`typo-proof`、`vibe-phase-bar`）必须重启。
+- **客户端插件改动不用重启**：bundle 带内容哈希 `&rev=`，刷新就换；有宿主半边的（`payload-diet`、`background-send`、`deliver`、`git-panel`、`typo-proof`、`vibe-phase-bar`、`dsh-mnemon`）必须重启。
+- **`dsh-mnemon` 的记忆空间需要外部后端**：默认 provider 要全局装 `@mnemon-dev/mnemon` CLI；不装时只有 runtime 记忆与项目文档可用，`MEMORY.md` 满了会归档到本地文件而不是记忆空间。
 - **0.2.2 默认关掉了两项防护**：`applyPatch`（这套 Web 组合里仍是 false）和 `fs-observation-policy` 的「先读后写」。改文件前要不要打开，按场景决定。

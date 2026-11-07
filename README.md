@@ -20,7 +20,8 @@ dsh-extensions/
     ├── typo-proof/            日记错别字检查：本地模型采样、云端盲复核，确认的改动以修订模式写进 docx 副本
     ├── llm-retry-ladder/      模型请求重试：停用内置指数退避，改成分段阶梯（1s×5 → 2s×5 → 10s×100）
     ├── external/              第三方插件源码（git 子模块，仓库里只有 commit 指针）
-    │   └── dsh-live-compact/  边做边压：不调模型的尾部小切压缩（MIT，上游 MerkyorLynn/dsh-live-compact）
+    │   ├── dsh-live-compact/  边做边压：不调模型的尾部小切压缩（MIT，上游 MerkyorLynn/dsh-live-compact）
+    │   └── dsh-mnemon/        分层记忆：常驻 runtime + 项目文档 + 记忆空间（MIT，上游 omdsh-dev/dsh-mnemon）
     └── .deprecated.*/         已停用的插件，代码保留备查，不装进 profile（见下文「已停用的插件」）
         ├── .deprecated.mobile-fit/          窄屏适配：被 0.2.2 官方折叠侧栏取代
         ├── .deprecated.mux-deflate/         宿主侧 WebSocket 压缩：官方默认开启
@@ -126,6 +127,16 @@ git submodule update --remote plugins/external/dsh-live-compact
 ```powershell
 dsh plugin --profile aa add "<上游真实包名>@link:<repo>/plugins/external/<名>"
 ```
+
+**例外：`dsh-mnemon` 不适用 `link:`。** 它是 TS monorepo（20+ 个 workspace 包，`lib/` 由
+`pnpm build` 产出），本地构建成本高；上游已发预构建 npm 包，所以这里的子模块只作**源码引用与
+版本钉**，实际安装走 registry：
+
+```powershell
+dsh plugin --profile aa add dsh-mnemon@0.5.42   # 版本与子模块的 tag 保持一致
+```
+
+子模块和 npm 包必须钉同一个版本，否则「我读的源码」和「跑起来的代码」对不上。
 
 方式别用反：**只读引用才用子模块**——在子模块里改代码，下次 `update --remote` 就被冲掉。
 真要改，就 fork，或者复制进 `plugins/` 当自己的插件维护。
