@@ -11,7 +11,7 @@
 对话里：
 
 ```
-typo_check({ file: "C:\\Users\\autod\\OneDrive\\旧事重提\\日记\\2011~2014.docx" })
+typo_check({ file: "<docx 的绝对路径>" })
 ```
 
 右侧栏「错别字」面板：点「开始检查」走同一套管线，进度、候选、下载都在面板里。

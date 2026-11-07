@@ -267,9 +267,9 @@ plugins/typo-proof/
 
 **仓库外：装到 profile（已查实，见下）**
 
-当前 dsh 由 `dsh --profile aa` 启动（进程命令行实测），profile 目录 `~/.dsh/profiles/aa/`。该 profile **已装 12 个本地插件**（全部 `link:` 到 `C:/Users/autod/Documents/GitHub/dsh-extensions/plugins/*` 与本机其他目录），装法是两处同时改：
+当前 dsh 由 `dsh --profile aa` 启动（进程命令行实测），profile 目录 `~/.dsh/profiles/aa/`。该 profile **已装 12 个本地插件**（全部 `link:` 到 `<仓库>/plugins/*` 与本机其他目录），装法是两处同时改：
 
-1. `package.json` 的 `dependencies` 加 `"@local/typo-proof": "link:C:/Users/autod/Documents/GitHub/dsh-extensions/plugins/typo-proof"`
+1. `package.json` 的 `dependencies` 加 `"@local/typo-proof": "link:<仓库>/plugins/typo-proof"`
 2. 同文件 `dsh.profile.bundles` 数组追加 `"@local/typo-proof"`
 3. `pnpm install`（profile 用 pnpm workspace，`nodeLinker: hoisted`），再重启 dsh 生效
 

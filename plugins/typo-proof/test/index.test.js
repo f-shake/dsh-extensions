@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { miniDocx } from "./fixtures/mini-docx.js";
 
 import { apply, completeText, createHandlers, describeProviders, listDirectory, mergeConfig, normalizeConfig, panelState, reviewToState, sameOrigin, toItems } from "../index.js";
 
@@ -311,4 +312,23 @@ test("host：列目录只给子目录与 .docx，隐藏文件与别的类型都�
   assert.ok(listing.files[0].path.endsWith("a.docx"));
 
   await assert.rejects(() => listDirectory(join(dir, "不存在")), /读不了这个目录/);
+});
+
+test("host：开始一次检查前先确认文件存在，并把路径记进面板设置", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "typo-proof-remember-"));
+  const file = join(dir, "a.docx");
+  await writeFile(file, miniDocx());
+  const settingsPath = join(dir, "settings.json");
+
+  const ctx = {
+    effect: (factory) => factory(),
+    inject: () => {},
+    tools: { register: () => {} },
+    get: () => ({ listProviders: async () => [] }),
+  };
+  apply(ctx, { file, settingsPath, localProvider: "p", localModel: "m" });
+  // apply 内部把 start 闭在 jobs 上，这里只验设置文件的行为：直接调模块导出的写入口。
+  const { writeSettings, readSettings } = await import("../lib/settings.js");
+  await writeSettings(settingsPath, { file });
+  assert.equal((await readSettings(settingsPath)).file, file);
 });

@@ -1,19 +1,15 @@
 # typo-proof 的 Loader 行。
 #
-# 这里填的是**默认值**，重启才生效。面板右上角「设置」里改的值会覆盖它，
-# 存在 ~/.dsh/typo-proof/settings.json，保存即刻生效、不用重启。
+# 这里只放**通用默认值**：数字参数这类跟机器无关的东西。文件路径、provider、
+# 模型名一律不写死——它们是每台机器自己的事，写进仓库等于把别人的路径和模型名
+# 带进 git 历史。
 #
-# provider / 模型名必须和「设置 → 模型」里的完全一致。填错不会静默：
-# 点「开始检查」会直接报错，并把模型栏里现成的名字列出来。
+# 面板右上角「设置」里改的值存在 ~/.dsh/typo-proof/settings.json（本机用户目录，
+# 不进仓库），优先级高于这里的值，保存即刻生效、不用重启。
 - insert:
     - id: typo-proof
       name: '@local/typo-proof'
       config:
-        file: 'C:\Users\autod\OneDrive\旧事重提\日记\2011~2014.docx'
-        localProvider: qwen-4b
-        localModel: qwen3.5_4b
-        reviewProvider: deepseek-official
-        reviewModel: deepseek-flash
         minHanzi: 8
         samples: 3
         concurrency: 3

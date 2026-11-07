@@ -652,11 +652,6 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'tp-empty' },
         h(
-          'p',
-          null,
-          '逐句交给本地模型检查三次，其中两次改动了这句时，把这些改动（含只出现一次的地方）交给云端复核；确认的改动写进文档副本的修订模式，原文件不动。',
-        ),
-        h(
           'div',
           { className: 'tp-form' },
           h(

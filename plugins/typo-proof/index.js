@@ -589,6 +589,12 @@ export function apply(ctx, rawConfig) {
   const start = async (options) => {
     const config = await configFor();
     const file = resolveFile(options.file, config);
+    // 先确认文件在，再把它记成「上次用的」：路径通常来自文件选择框，
+    // 记不住的话每次打开面板都得重新点一遍。写进面板设置（用户目录），不进仓库。
+    const info = await stat(file).catch(() => null);
+    if (info === null) throw new Error(`找不到文件：${file}`);
+    if (!info.isFile()) throw new Error(`这不是一个文件：${file}`);
+    await writeSettings(settingsPath, { file }).catch(() => {});
     if (config.localModel === "") {
       // 报错时把模型栏里现有的都列出来：不然用户只知道「没配」，不知道该填什么。
       const hint = await describeProviders(ctx);
