@@ -32,8 +32,10 @@ VPS (Windows) nginx :443
 | `<repo>\dsh-auth\.env` | 密码哈希、TOTP 密钥、cookie 密钥、token 文件路径 |
 | `<repo>\dsh-auth\totp-qr.png` | Authenticator 扫码用 |
 | `<repo>\dsh-auth\totp-auth.log` | 失败审计：`PWD_FAIL` / `TOTP_FAIL` / `COOKIE_FAIL` / `AUTH_OK`，含 IP |
-| `<repo>\dsh-auth\start-auth.ps1` | 前台启动（调试用） |
-| `<repo>\dsh-auth\install-service.ps1` | 注册为 NSSM 服务 `dsh-auth`（需管理员） |
+| `<repo>\dsh-auth\start-auth.ps1` | 启动器：以隐藏 + 重定向方式起 uvicorn，并等它退出（崩溃退出码交给任务重启） |
+| `<repo>\dsh-auth\start-auth-hidden.vbs` | 计划任务 `dsh-auth` 的实际入口：wscript 无窗口拉起 start-auth.ps1 |
+| `<repo>\dsh-auth\auth.out.log` / `auth.err.log` | uvicorn 的 access / startup 日志（每次启动重建，上一份 stderr 留 `.prev`） |
+| `<repo>\dsh-auth\install-service.ps1` | 可选：注册为 NSSM 服务 `dsh-auth`（需管理员；nssm 装在 `C:\Running\nssm.exe`） |
 | `<repo>\dsh-auth\set-password.py` | 改密码 |
 | `<repo>\dsh-auth\vps\nginx-dsn.conf` | **要贴到 VPS 的 nginx 配置** |
 | `<repo>\dsh-auth\vps\verify-public.ps1` | 公网自检脚本 |
@@ -72,10 +74,12 @@ VPS (Windows) nginx :443
 ## 五、日常运维
 
 ```powershell
-# 认证服务
-Get-Service dsh-auth
-Restart-Service dsh-auth        # 管理员
+# 认证服务（本机实际是计划任务 dsh-auth，登录触发；不是 Windows 服务）
+Get-ScheduledTask dsh-auth | Select-Object State
+Stop-Process -Id (Get-NetTCPConnection -LocalPort 8099 -State Listen).OwningProcess -Force
+Start-ScheduledTask dsh-auth
 Invoke-WebRequest http://127.0.0.1:8099/healthz -UseBasicParsing
+Get-Content <repo>\dsh-auth\auth.out.log -Tail 20     # access log
 
 # 改密码（改完所有会话失效，TOTP 不变）
 <repo>\dsh-auth\.venv\Scripts\python.exe <repo>\dsh-auth\set-password.py
@@ -99,6 +103,7 @@ Get-Content <repo>\dsh-auth\totp-auth.log -Tail 30
 | 504 | 上游超时：隧道空闲退避或 dsh 卡住 |
 | 登录页能开、登录后仍回登录页 | cookie 没带上：看响应头 `Set-Cookie` 有没有 `Secure`，以及 `X-Forwarded-Proto` 是否透传 |
 | `/api` 403 | dsh 的 `--trusted-host` 没生效（本次已加，重启后应消失） |
+| 桌面上多出一个刷屏 `GET /check-cookie 200 OK` 的终端窗口 | 那是 auth 的启动器控制台，**不是 dsh**，别直接关（关 = 杀 uvicorn = 8099 网关消失）。本机默认终端是 Windows Terminal，它会无视 `-WindowStyle Hidden` 给隐藏控制台开窗；任务入口已改成 `wscript.exe start-auth-hidden.vbs`（2026-11-08）。旧窗口要等下次登录/重启才消失 |
 
 ## 七、回滚
 
