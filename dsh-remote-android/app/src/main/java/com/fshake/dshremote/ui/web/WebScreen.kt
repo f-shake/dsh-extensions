@@ -177,7 +177,16 @@ fun WebScreen(
                                     menuExpanded = false
                                     liveProbe = null
                                     showDiagnostics = true
-                                    controller.evaluate(WebCompat.liveProbeScript) { liveProbe = it }
+                                    controller.evaluate(WebCompat.liveProbeScript) {
+                                        liveProbe = it
+                                        // 同一份结果也写进 logcat：人不在机器旁边时，一条 adb logcat 就能代替截图。
+                                        // evaluateJavascript 会把字符串再套一层 JSON 引号与转义，先还原再打。
+                                        val text = it.orEmpty()
+                                            .removeSurrounding("\"")
+                                            .replace("\\\"", "\"")
+                                            .replace("\\n", "\n")
+                                        android.util.Log.i("DSHPROBE", text.ifEmpty { "读取失败" })
+                                    }
                                 },
                             )
                             DropdownMenuItem(

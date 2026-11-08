@@ -83,6 +83,16 @@ object WebCompat {
   var vhForce = false;
   var vhSignature = '';
   var vhHeight = 0;
+  // 100vh 是否为 0：null 表示还没测到（body 未就绪时不能下结论）
+  var vhBroken = null;
+  // 上次判定时的视口高度：判定要落在 resize 热路径上，高度没变就不该重新量
+  var vhBrokenAt = -1;
+  // 是否已经往页面写过补丁：写过就继续维护，不因判定翻转而撒手
+  var vhPatched = false;
+  // 每条被改写的声明：key 是那条款式声明对象，值是各属性的原值与优先级。
+  // 改写后值里就不含 vh 了，重算必须拿原值算，不能把 px 再按比例算一遍。
+  var vhSeen = new WeakMap();
+  var vhRules = [];
 
   // 页面里所有 calc(100vh - …) / min(400px, 50vh) / 100dvh 都是按视口高度算的。
   // 而这类 WebView 的初始包含块高度是 0（window.innerHeight 正常，100vh 却是 0），
@@ -118,78 +128,134 @@ object WebCompat {
     var rules = 0;
     for (var i = 0; i < document.styleSheets.length; i++) {
       var sheet = document.styleSheets[i];
-      // 自己写的那张覆盖样式不算，否则每写一次签名就变一次，白跑一轮
-      if (sheet.ownerNode && sheet.ownerNode.id === 'dsh-remote-vh') continue;
+      if (sheet.disabled) continue;
       sheets++;
       try { rules += countRules(sheet.cssRules, 4); } catch (e) { }
     }
     return sheets + ':' + rules;
   }
 
-  function rebuildViewportUnits(force) {
-    if (!document.head) return;
-    var h = Math.round(window.innerHeight || 0);
-    if (h <= 0) return;
-    var signature = stylesheetSignature();
-    if (!force && h === vhHeight && signature === vhSignature) return;
-    var parts = [];
-    // 媒体条件按层包起来，避免 sheet 的 media 和内层 @media 互相覆盖
-    function wrap(css, conditions) {
-      var out = css;
-      for (var i = conditions.length - 1; i >= 0; i--) out = '@media ' + conditions[i] + '{' + out + '}';
-      return out;
+  // 100vh 是否不可用：这类 WebView 的初始包含块高度是 0，算出来就是 0；
+  // 也可能被缓存成旋转前的旧高度。两种都算「坏」——判据是「与 window.innerHeight 对不上」，
+  // 健康设备上两者相等，于是下面所有改写都会跳过。
+  // 每次视口高度变化才重新量：探针要读 offsetHeight，那是强制整页同步布局，
+  // 而判定会被 resize / visualViewport.resize 连续调用（键盘动画、旋转）。
+  function viewportBroken() {
+    if (!document.body) return false;
+    var inner = Math.round(window.innerHeight || 0);
+    // 量不到视口（body 还没显出来）就沿用上次结论，别把「没量准」当成「健康」
+    if (inner <= 0) return vhBroken === true;
+    if (vhBroken !== null && inner === vhBrokenAt) return vhBroken;
+    var probe = document.createElement('div');
+    probe.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:100vh';
+    var measured = -1;
+    try {
+      document.body.appendChild(probe);
+      measured = probe.offsetHeight;
+    } catch (e) {
+      measured = -1;
     }
-    function walk(rules, conditions) {
+    if (probe.parentNode) probe.parentNode.removeChild(probe);
+    if (measured < 0) return vhBroken === true;
+    vhBroken = Math.abs(measured - inner) > 1;
+    vhBrokenAt = inner;
+    return vhBroken;
+  }
+
+  // 判定只决定「要不要开始修」。一旦开始修就必须继续维护：
+  // 中途某次判定翻回健康就撒手，会把页面冻结在误判那一刻的尺寸上（旋转、键盘后不再更新）。
+  function needsViewportFix() {
+    return vhPatched || viewportBroken();
+  }
+
+  // 就地改写声明，不再另插一张覆盖表：层叠顺序、媒体查询、@layer 全部保持页面原样。
+  // 早先的做法是把带 vh 的规则抄进一张 !important 覆盖表，等于用桌面规则覆盖所有宽度，
+  // 把窄屏的「全屏抽屉」压成了 800px 的居中弹窗（移动端那条 height:100% 被顶掉）。
+  function trackDeclaration(style, prop, value, priority) {
+    var record = vhSeen.get(style);
+    if (!record) {
+      record = {};
+      vhSeen.set(style, record);
+    }
+    record[prop] = { value: value, priority: priority };
+    for (var i = 0; i < vhRules.length; i++) {
+      if (vhRules[i].style === style && vhRules[i].prop === prop) return;
+    }
+    vhRules.push({ style: style, prop: prop });
+  }
+
+  function scanViewportUnits() {
+    // 记录这一轮还能看到的声明对象：页面重建样式表之后，旧对象再也写不进页面，
+    // 留在 vhRules 里只会让每次 resize 越扫越长（旧表被整张替换时尤其明显）。
+    var live = typeof Set === 'function' ? new Set() : null;
+    function walk(rules) {
       for (var i = 0; i < rules.length; i++) {
         var rule = rules[i];
-        // 原生 CSS 嵌套里的相对选择器不能直接搬到顶层，跳过
-        if (rule.parentRule && rule.parentRule.type === 1) continue;
         if (rule.style) {
-          var decls = '';
-          for (var j = 0; j < rule.style.length; j++) {
-            var name = rule.style[j];
-            var value = rule.style.getPropertyValue(name);
+          var style = rule.style;
+          if (live) live.add(style);
+          for (var j = 0; j < style.length; j++) {
+            var name = style[j];
+            var value = style.getPropertyValue(name);
             if (!/\d(dvh|svh|vh)\b/.test(value)) continue;
             // 别碰字符串和 url() 里的字样
             if (/url\(|["']/i.test(value)) continue;
-            decls += name + ':' + vhToPx(value, h) + ' !important;';
+            trackDeclaration(style, name, value, style.getPropertyPriority(name));
           }
-          if (decls && rule.selectorText) parts.push(wrap(rule.selectorText + '{' + decls + '}', conditions));
         }
-        if (rule.cssRules) {
-          // @media 保留条件，@supports 之类的丢弃条件（它本来就是靠检测视口单位才生效的）
-          walk(rule.cssRules, rule.media ? conditions.concat([rule.media.mediaText]) : conditions);
-        } else if (rule.styleSheet) {
-          // @import 进来的表
-          var next = rule.media && rule.media.mediaText ? conditions.concat([rule.media.mediaText]) : conditions;
-          try { walk(rule.styleSheet.cssRules, next); } catch (e) { }
-        }
+        if (rule.cssRules) walk(rule.cssRules);
+        else if (rule.styleSheet) { try { walk(rule.styleSheet.cssRules); } catch (e) { } }
       }
     }
     for (var s = 0; s < document.styleSheets.length; s++) {
       var sheet = document.styleSheets[s];
-      if (sheet.disabled) continue;
-      if (sheet.ownerNode && sheet.ownerNode.id === 'dsh-remote-vh') continue;
+      // disabled 的表也要登记：它只是暂时不生效（切主题常这么干），
+      // 按「本轮是否可见」剪枝会把原值一起删掉，重新启用时就再也接不上了。
       var rules = null;
       try { rules = sheet.cssRules; } catch (e) { rules = null; }
-      var conditions = sheet.media && sheet.media.mediaText ? [sheet.media.mediaText] : [];
-      if (rules) walk(rules, conditions);
+      if (rules) walk(rules);
     }
-    var style = document.getElementById('dsh-remote-vh');
-    if (!style) {
-      style = document.createElement('style');
-      style.id = 'dsh-remote-vh';
-      document.head.appendChild(style);
+    if (!live) return;
+    var kept = [];
+    for (var k = 0; k < vhRules.length; k++) {
+      if (live.has(vhRules[k].style)) {
+        kept.push(vhRules[k]);
+      } else {
+        vhSeen.delete(vhRules[k].style);
+      }
     }
-    style.textContent = parts.join('\n');
-    // 这张表必须排在 head 末尾：插件后注入的样式也带 !important，
-    // 同优先级时靠文档顺序决胜，留在前面就会被插件里的 100dvh 兜底值压回去
-    // （实测：设置弹窗 max-height 被算成 0，整框塌掉）。
-    if (style.parentNode !== document.head || style !== document.head.lastElementChild) {
-      document.head.appendChild(style);
+    vhRules = kept;
+  }
+
+  function applyViewportUnits(h) {
+    for (var i = 0; i < vhRules.length; i++) {
+      var entry = vhRules[i];
+      var record = vhSeen.get(entry.style);
+      var original = record && record[entry.prop];
+      if (!original) continue;
+      try {
+        entry.style.setProperty(entry.prop, vhToPx(original.value, h), original.priority);
+      } catch (e) { }
     }
-    vhSignature = signature;
+  }
+
+  function rewriteViewportUnits(force) {
+    if (!document.head) return;
+    // 视口单位本身正常时一个字节都不改：页面自己的响应式规则就是对的
+    if (!needsViewportFix()) return;
+    var h = Math.round(window.innerHeight || 0);
+    if (h <= 0) return;
+    var signature = stylesheetSignature();
+    var scanned = false;
+    if (force || signature !== vhSignature) {
+      scanViewportUnits();
+      vhSignature = signature;
+      scanned = true;
+    }
+    if (!scanned && h === vhHeight) return;
+    applyViewportUnits(h);
     vhHeight = h;
+    if (vhRules.length > 0) vhPatched = true;
   }
 
   function scheduleViewportUnits(force) {
@@ -199,7 +265,7 @@ object WebCompat {
       vhTimer = null;
       var forced = vhForce;
       vhForce = false;
-      rebuildViewportUnits(forced);
+      rewriteViewportUnits(forced);
     }, 300);
   }
 
@@ -209,7 +275,9 @@ object WebCompat {
   var pinnedHeight = 0;
 
   function pinLayoutHeight(force) {
-    if (!document.head) return;
+    if (!document.head || !document.body) return;
+    // 只在 100vh 确实坏掉时才碰根节点：健康设备保持页面自己的布局
+    if (!needsViewportFix()) return;
     var h = Math.round(window.innerHeight || 0);
     if (h <= 0) return;
     if (!force && h === pinnedHeight) return;
@@ -220,8 +288,12 @@ object WebCompat {
       style = document.createElement('style');
       style.id = 'dsh-remote-layout-fix';
       document.head.appendChild(style);
-      style.textContent = 'html,body,#root{height:100%}';
     }
+    // body 必须是定位祖先：设置浮层挂在 body 下，规则是 position:absolute + height:100%。
+    // 没有定位祖先时这个百分比对着「初始包含块」解析，而它在这类 WebView 里高度正是 0，
+    // 于是浮层塌成 0 高、里面的面板再被 flex 垂直居中，屏幕上只剩下半截。
+    var css = 'html,body,#root{height:100%}body{position:relative}';
+    if (style.textContent !== css) style.textContent = css;
     var nodes = [document.documentElement, document.body, document.getElementById('root')];
     for (var i = 0; i < nodes.length; i++) {
       var el = nodes[i];
@@ -229,12 +301,13 @@ object WebCompat {
       el.style.setProperty('height', px, 'important');
       el.style.setProperty('min-height', px, 'important');
     }
+    vhPatched = true;
   }
 
-  // 样式表扫描要走四千多条规则，不能每次 resize 都做；钉高度只是三次样式写入。
+  // 样式表扫描要走四千多条规则，不能每次 resize 都做；改写声明只是几十次属性写入。
   function applyLayoutFix() {
     pinLayoutHeight(true);
-    rebuildViewportUnits();
+    rewriteViewportUnits();
     installObserver();
   }
 
@@ -246,13 +319,30 @@ object WebCompat {
     try {
       var observer = new MutationObserver(function (records) {
         for (var i = 0; i < records.length; i++) {
-          var added = records[i].addedNodes;
+          var record = records[i];
+          // <link> 原地换 href / 切 media 也是换了一张表，旧声明对象同样作废
+          if (record.type === 'attributes') {
+            scheduleViewportUnits(true);
+            return;
+          }
+          // 页面原地重写 <style> 的内容（CSS-in-JS 换主题、重建样式表）：改写过的声明全被冲掉，必须重扫。
+          // 这种改写只会产生文本节点变更，element 判断接不住。
+          if (record.type === 'characterData' &&
+              record.target.parentNode && record.target.parentNode.tagName === 'STYLE') {
+            scheduleViewportUnits(true);
+            return;
+          }
+          var added = record.addedNodes;
           for (var j = 0; j < added.length; j++) {
             var node = added[j];
+            // 整体替换 textContent 时新加进来的是文本节点，同样意味着旧声明作废
+            if (node.nodeType === 3 && node.parentNode && node.parentNode.tagName === 'STYLE') {
+              scheduleViewportUnits(true);
+              return;
+            }
             if (node.nodeType !== 1) continue;
-            // 自己写的那两张表会被自己搬位置（appendChild 是先移除再插入），
-            // 不排除掉的话每次移表都会再触发一轮四千多条规则的全量扫描。
-            if (node.id === 'dsh-remote-vh' || node.id === 'dsh-remote-layout-fix') continue;
+            // 自己写的那张表只创建一次，排除掉避免自触发一轮全量扫描
+            if (node.id === 'dsh-remote-layout-fix') continue;
             var tag = node.tagName;
             if (tag === 'STYLE') {
               scheduleViewportUnits(true);
@@ -271,7 +361,14 @@ object WebCompat {
           }
         }
       });
-      observer.observe(document.head, { childList: true, subtree: true });
+      observer.observe(document.head, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        // 只盯这三类属性：head 里的节点可能带很多无关属性，全量监听会白扫
+        attributes: true,
+        attributeFilter: ['href', 'media', 'disabled'],
+      });
       observer.observe(document.body, { childList: true });
     } catch (e) { }
   }
@@ -469,34 +566,50 @@ object WebCompat {
       return h;
     }
     var fixStyle = document.getElementById('dsh-remote-layout-fix');
-    var vhStyle = document.getElementById('dsh-remote-vh');
-    var surface = document.querySelector('div[class*="_surface"][class*="_menu"]');
-    var surfaceInfo = null;
-    if (surface) {
-      var out = [];
-      (function scan(el, depth) {
-        if (out.length >= 8) return;
-        var cs = getComputedStyle(el);
-        var r = el.getBoundingClientRect();
-        out.push({
-          d: depth, cls: String(el.className || '').slice(0, 30), tag: el.tagName,
-          h: Math.round(r.height), w: Math.round(r.width),
-          cssH: cs.height, maxH: cs.maxHeight, minH: cs.minHeight,
-          pad: cs.paddingTop + '/' + cs.paddingBottom, ov: cs.overflowY, disp: cs.display
-        });
-        if (depth < 3) {
-          for (var i = 0; i < el.children.length; i++) scan(el.children[i], depth + 1);
-        }
-      })(surface, 0);
-      surfaceInfo = out;
-    }
     var root = document.getElementById('root');
+    function info(el) {
+      var cs = getComputedStyle(el);
+      var r = el.getBoundingClientRect();
+      var cls = '';
+      try { cls = typeof el.className === 'string' ? el.className : (el.getAttribute('class') || ''); } catch (e) { }
+      return {
+        tag: el.tagName, cls: String(cls).slice(0, 36),
+        t: Math.round(r.top), h: Math.round(r.height), w: Math.round(r.width),
+        cssH: cs.height, maxH: cs.maxHeight, pos: cs.position, disp: cs.display,
+        ai: cs.alignItems, jc: cs.justifyContent
+      };
+    }
+    function chain(el, up) {
+      var out = [];
+      var cur = el;
+      while (cur && cur.nodeType === 1 && out.length < up) {
+        out.push(info(cur));
+        cur = cur.parentElement;
+      }
+      return out;
+    }
+    function offsetChain(el) {
+      var out = [];
+      var cur = el;
+      while (cur && out.length < 6) { out.push(info(cur)); cur = cur.offsetParent; }
+      return out;
+    }
+    // 这两个类名来自 DSH 当前构建（CSS Modules 哈希），前端换一版就会查不到；
+    // 查不到时返回 null，只影响这条诊断项，不影响页面。
+    var overlay = document.querySelector('.VOzbGW_overlay');
+    var panel = document.querySelector('.VOzbGW_panel');
     return JSON.stringify({
-      vh: measure('100vh'), innerH: innerHeight,
+      vh: measure('100vh'), innerH: innerHeight, innerW: innerWidth,
+      vv: window.visualViewport ? Math.round(window.visualViewport.height) : -1,
+      viewW: document.documentElement.clientWidth,
+      viewH: document.documentElement.clientHeight,
       rootH: root ? Math.round(root.getBoundingClientRect().height) : -1,
-      surface: surfaceInfo,
-      fixText: fixStyle ? fixStyle.textContent.slice(0, 80) : null,
-      vhDecls: vhStyle ? (vhStyle.textContent.match(/!important/g) || []).length : -1
+      htmlInline: document.documentElement.getAttribute('style'),
+      overlay: overlay ? info(overlay) : null,
+      panel: panel ? info(panel) : null,
+      overlayOffsetChain: overlay ? offsetChain(overlay) : null,
+      overlayParents: overlay ? chain(overlay, 4) : null,
+      layoutFixText: fixStyle ? fixStyle.textContent : null
     });
   } catch (e) { return 'live-probe-error:' + e; }
 })();
