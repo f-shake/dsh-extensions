@@ -6,7 +6,7 @@ DSH（DeepSeek Harness）相关的自研部件，统一放在一个仓库里。
 dsh-extensions/
 ├── dsh-remote-android/        Android 客户端：远程访问 DSH 实例（Kotlin + Compose + WebView）
 ├── dsh-auth/                  DSH 公网访问网关：密码 + TOTP 双因子（Python / FastAPI）
-├── skills/                    vibe coding 系列技能（skill 源文件，同步到 ~/.dsh/skills 生效）
+├── skills/                    技能源文件（同步到 ~/.dsh/skills 生效）：vibe coding 系列 + notify-mail
 └── plugins/                   DSH 客户端插件（Cordis bundle）
     ├── session-activity-order/ 侧栏排序：活跃工作区/会话自动置顶
     ├── header-compact/        窄屏标题行收紧：计数文案换短写法、隐藏手机端无用的「在本地打开」
@@ -144,8 +144,12 @@ dsh plugin --profile aa add dsh-mnemon@0.5.42   # 版本与子模块的 tag 保�
 
 ## skills
 
-`vibe-coding`、`grilling`、`review-and-fix-cycle` 三个技能的源文件，原来在 OneDrive 的
-独立仓库里，现并入本仓库统一版本管理。
+四个技能的源文件：
+
+- `vibe-coding`、`grilling`、`review-and-fix-cycle`：原来在 OneDrive 的独立仓库里，现并入本仓库统一版本管理
+- `notify-mail`：原只存在于 `~/.dsh/skills/`（无源仓库），已收进来当唯一源。正文里的路径仍写
+  `~/.dsh/skills/notify-mail\...`，所以**改完必须同步**才能生效；密钥/配置在 `~/.dsh/` 根下的
+  `mail.json` + `secrets\resend.key.enc`，不在技能目录里
 
 **本仓库是「源」，`~/.dsh/skills/` 是「副本」——改这里的文件不会自动生效，必须同步：**
 
@@ -155,7 +159,8 @@ dsh plugin --profile aa add dsh-mnemon@0.5.42   # 版本与子模块的 tag 保�
 .\scripts\sync-skills.ps1 -NoBackup # 不做备份（确认副本不比仓库新时才用）
 ```
 
-脚本不碰 `anydrop`、`docsearch-*`、`notify-mail` 这些不由本仓库管理的技能。
+脚本不碰不归本仓库管理的技能（同一目录下由各自项目维护的那些）；`~/.agents/skills/` 是另一个
+技能根，也不在它的扫描范围里。
 
 **覆盖前会先备份**：要把旧目录拷到 `~/.dsh/skills.bak/<时间戳>/<技能名>`，只留最近 5 份
 （`-MaxBackups` 可调）。备份目录在 `skills/` 外面，不会被当成技能扫到。
