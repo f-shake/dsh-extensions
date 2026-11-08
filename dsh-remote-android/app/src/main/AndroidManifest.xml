@@ -3,6 +3,11 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 网页里的语音输入走 getUserMedia(audio)：RECORD_AUDIO 由宿主放行，
+         而 chromium 自己还要选音频通信设备，缺 MODIFY_AUDIO_SETTINGS 时
+         getUserMedia 会报 NotReadableError（Could not start audio source） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- 仅 Android 9 及以下需要写公共下载目录，Android 10 起由下载管理器自行处理 -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"

@@ -13,6 +13,7 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.ConsoleMessage
 import android.webkit.DownloadListener
+import android.webkit.PermissionRequest
 import android.webkit.SslErrorHandler
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
@@ -150,6 +151,8 @@ fun DshWebView(
     val expectedHost = remember(host.baseUrl) { UrlMatchers.hostOf(host.baseUrl).orEmpty() }
     var pendingFileCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
     var pendingDownload by remember { mutableStateOf<DownloadRequest?>(null) }
+    // 页面要麦克风时先把请求挂起，等系统授权结果回来再答复它
+    var pendingMicRequest by remember { mutableStateOf<PermissionRequest?>(null) }
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -160,6 +163,23 @@ fun DshWebView(
             granted -> enqueueDownload(context.applicationContext, request)
             else -> Toast.makeText(context, "未授予存储权限，无法保存到下载目录", Toast.LENGTH_SHORT).show()
         }
+    }
+    val micLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val request = pendingMicRequest
+        pendingMicRequest = null
+        if (request != null) {
+            // 被拒也要明确答复：不回话时页面会一直停在「等待授权」，录音按钮点了没反应
+            if (granted) request.grant(WebPermission.grants()) else request.deny()
+        }
+        // 页面只会显示「无法开始录音」，用户看不出是权限问题；这里补一句，并指到系统设置，
+        // 因为第二次拒绝之后系统不再弹窗，再点麦克风只会静默失败
+        if (!granted) {
+            Toast.makeText(context, "未授予录音权限，语音输入不可用；可在系统设置里允许", Toast.LENGTH_LONG)
+                .show()
+        }
+        WebDiagnostics.add("[perm] mic granted=$granted")
     }
 
     // 回调闭包会随重组更新，避免 factory 捕获到旧的状态
@@ -333,6 +353,37 @@ fun DshWebView(
                         currentOnProgress(newProgress)
                     }
 
+                    override fun onPermissionRequest(request: PermissionRequest) {
+                        val resources = request.resources
+                        val origin = request.origin?.toString()
+                        // 只信应用自己的主机：子框架请求在跳转判定里是放行的，跨域 iframe
+                        // 或注入脚本同样能走到这里。按来源放行，麦克风才不会变成整页可用
+                        if (!WebPermission.isTrustedOrigin(origin, expectedHost)) {
+                            WebDiagnostics.add("[perm] deny origin=$origin")
+                            request.deny()
+                            return
+                        }
+                        // 摄像头等资源直接拒：语音输入只申请麦克风
+                        if (!WebPermission.isAudioOnly(resources)) {
+                            WebDiagnostics.add("[perm] deny ${resources.joinToString()}")
+                            request.deny()
+                            return
+                        }
+                        val granted = ContextCompat.checkSelfPermission(
+                            ctx,
+                            Manifest.permission.RECORD_AUDIO,
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (granted) {
+                            WebDiagnostics.add("[perm] grant audio")
+                            request.grant(WebPermission.grants())
+                            return
+                        }
+                        // 同一时刻只挂一个：旧的先拒掉，免得授权结果回给过期的请求
+                        pendingMicRequest?.deny()
+                        pendingMicRequest = request
+                        micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+
                     override fun onShowFileChooser(
                         webView: WebView,
                         filePathCallback: ValueCallback<Array<Uri>>,
@@ -393,6 +444,9 @@ fun DshWebView(
         // 脚本、长连接与渲染资源会一直跟着进程活着，所以这里显式销毁。
         onRelease = { view ->
             released.set(true)
+            // 视图销毁后不会再有人答复页面，挂起的授权直接拒掉
+            pendingMicRequest?.deny()
+            pendingMicRequest = null
             controller.releaseView()
             WebDiagnostics.add("[release] ${runCatching { view.url }.getOrNull() ?: "unknown"}")
             runCatching {

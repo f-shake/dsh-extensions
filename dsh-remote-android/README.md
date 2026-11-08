@@ -19,6 +19,7 @@ Android 客户端，用于远程访问已发布到公网的 DeepSeek Harness 实
 - 返回键：网页里的菜单、对话框、侧栏、浮动面板打开时，按系统返回键先逐层关掉最上层；没有浮层时才回退网页历史或退回主机列表。
 - 状态栏：图标明暗跟随系统深浅色，应用在前台切换主题也不会残留白字；导航栏图标同步。
 - 顶栏刷新：右上角“更多”左侧有独立的刷新按钮，点击重新加载当前页面。
+- 语音输入：网页请求麦克风时向系统申请录音权限（只放行音频采集，摄像头等一律拒绝），授权后即可在 DSH 里直接说话转文字。
 
 > 预置的两台主机指向 `dsn.example.com` / `dw.example.com`（示例域名）。要指向自己的实例，改
 > `data/HostStore.kt` 里的 `PRESET_NAS_URL` / `PRESET_WORK_URL`，或直接在应用里新增主机。
@@ -71,6 +72,7 @@ app/src/main/java/com/fshake/dshremote/
 - 成功后不伪造 DSH 的会话 cookie，而是把响应的 Set-Cookie 写进 WebView 的 CookieManager，再由 WebView 打开带 token 的下一跳，让 DSH 在正确的 authority 下自行签发。
 - 会话有效期不写死：从 `dsh_auth` 的 `v1.<exp>` 读取，读不到再退回 `Max-Age`、`Expires`；两台主机的服务端配置可以不同。
 - 只用手机 UA，不提供桌面视图切换。
+- 语音输入要两条 Manifest 权限：`RECORD_AUDIO` 由宿主放行，`MODIFY_AUDIO_SETTINGS` 供 chromium 选音频通信设备——缺后者 `getUserMedia` 报 `NotReadableError: Could not start audio source`。授权回调里只放行来自应用主机（同主机名）的纯音频请求；同批带了摄像头等资源的请求整次拒绝，因为 Chromium 对子集授权会让整个 `getUserMedia` 失败。
 
 ## 手工验证清单
 
@@ -96,9 +98,13 @@ app/src/main/java/com/fshake/dshremote/
 18. 应用保持前台时切换系统深色/浅色：状态栏与导航栏图标立即跟着变，浅色下不是白字。
 19. 点顶栏刷新图标：页面重新加载；“更多”菜单里没有“刷新”。
 20. 平板或折叠屏展开（≥768dp）：侧栏是常驻列，按返回不会把它收起。
+21. 首次点语音输入：弹出系统录音授权；允许后说话，识别文字落进输入框草稿，可编辑后发送。
+22. 点“不允许”：出现“未授予录音权限”的提示，不是点完毫无反应；到系统设置里允许后重试，可正常录音。
+23. 网页里请求摄像头（浏览器控制台调用 `getUserMedia({video:true})`）：不弹系统授权、请求直接失败，诊断里记 `[perm] deny`。
 
 ## 安全说明
 
 - 只接受 https 地址，应用不配置明文流量。
 - 密码只以密文形式存在本机，密钥在 Android Keystore 内生成且不可导出；关闭了应用备份与设备迁移。
 - 会话 cookie 由 WebView 自身保存，未落盘到应用自己的存储。
+- 网页麦克风只对应用认定的主机放行，其它来源（含跨域 iframe）的请求一律拒绝。
