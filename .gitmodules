@@ -1,6 +1,6 @@
 [submodule "plugins/external/dsh-live-compact"]
 	path = plugins/external/dsh-live-compact
-	url = https://github.com/MerkyorLynn/dsh-live-compact.git
+	url = https://github.com/Tranquillitatis-Lab/dsh-live-compact.git
 [submodule "plugins/external/dsh-mnemon"]
 	path = plugins/external/dsh-mnemon
 	url = https://github.com/omdsh-dev/dsh-mnemon.git

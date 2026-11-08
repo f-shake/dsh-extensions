@@ -20,7 +20,7 @@ dsh-extensions/
     ├── typo-proof/            日记错别字检查：本地模型采样、云端盲复核，确认的改动以修订模式写进 docx 副本
     ├── llm-retry-ladder/      模型请求重试：停用内置指数退避，改成分段阶梯（1s×5 → 2s×5 → 10s×100）
     ├── external/              第三方插件源码（git 子模块，仓库里只有 commit 指针）
-    │   ├── dsh-live-compact/  边做边压：不调模型的尾部小切压缩（MIT，上游 MerkyorLynn/dsh-live-compact）
+    │   ├── dsh-live-compact/  边做边压：不调模型的尾部小切压缩（MIT，上游 Tranquillitatis-Lab/dsh-live-compact，原 MerkyorLynn）
     │   └── dsh-mnemon/        分层记忆：常驻 runtime + 项目文档 + 记忆空间（MIT，上游 omdsh-dev/dsh-mnemon）
     └── .deprecated.*/         已停用的插件，代码保留备查，不装进 profile（见下文「已停用的插件」）
         ├── .deprecated.mobile-fit/          窄屏适配：被 0.2.2 官方折叠侧栏取代
