@@ -298,6 +298,75 @@ object WebCompat {
 """.trimIndent()
 
     /**
+     * 返回键的第一优先级：关掉页面上最上层的浮层，返回关掉的层名（没有浮层时 `none`）。
+     *
+     * DSH 的对话框、菜单、候选面板都实现了 Escape 关闭（在 document/window 上监听，
+     * 按各自的层栈只处理最上层），所以这里不逐个点关闭按钮，只在检测到浮层时派发一次
+     * Escape；侧栏、右栏、浮动面板没有 Escape 语义，按各自的官方标记点关闭控件。
+     *
+     * 选择器取自 DSH 0.2.2 的官方实现（布局 / 侧栏 / 右栏 / dockkit），
+     * 与 plugins/swipe-sidebar 用的是同一组标记。
+     */
+    val backDismissScript: String = """
+(function () {
+  try {
+    function visible(el) {
+      if (!el || !el.getClientRects().length) return false;
+      var cs = getComputedStyle(el);
+      return cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0';
+    }
+    function top(selector) {
+      var list = document.querySelectorAll(selector);
+      for (var i = list.length - 1; i >= 0; i--) {
+        if (visible(list[i])) return list[i];
+      }
+      return null;
+    }
+    function pressEscape() {
+      var target = document.activeElement || document.body || document.documentElement;
+      target.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+        bubbles: true, cancelable: true, composed: true
+      }));
+    }
+    // 1) 下拉菜单 / 右键菜单：portal 到 body，层级最高。
+    if (top('[role="menu"]') !== null) { pressEscape(); return 'menu'; }
+    // 2) 输入框候选 / 命令面板：React 挂在输入元素上，事件必须派给焦点元素。
+    if (top('[role="listbox"]') !== null) { pressEscape(); return 'listbox'; }
+    // 3) 模态对话框；左侧抽屉也带 aria-modal，留到后面用抽屉自己的方式关。
+    if (top('[role="dialog"][aria-modal="true"]:not([data-shortcut-modal="sidebar"])') !== null) {
+      pressEscape(); return 'dialog';
+    }
+    // 4) 左侧抽屉：遮罩常驻，收起时 frame 带 data-sidebar-collapsed。
+    var mask = document.querySelector('[data-sidebar-mask]');
+    if (mask !== null) {
+      var frame = mask.parentElement;
+      if (frame === null || !frame.hasAttribute('data-sidebar-collapsed')) {
+        mask.click();
+        return 'drawer';
+      }
+    }
+    // 5) 浮动面板：收回停靠，不销毁标签页内容。
+    var float = top('[data-dockkit-float]');
+    if (float !== null) {
+      var dock = float.querySelector('[data-dockkit-float-dock]');
+      if (dock !== null) { dock.click(); return 'float'; }
+    }
+    // 6) 手机上的全屏右侧栏；停靠/推挤形态属于布局，不算浮层。
+    var panel = document.querySelector('[data-sidebar-right-panel="fullscreen"][data-sidebar-right-open]');
+    if (panel !== null) {
+      var close = panel.querySelector('[data-sidebar-right-toggle]') ||
+        document.querySelector('[data-sidebar-right-toggle]');
+      if (close !== null) { close.click(); return 'right'; }
+    }
+    return 'none';
+  } catch (e) {
+    return 'none';
+  }
+})();
+""".trimIndent()
+
+    /**
      * 页面内部状态探针：用来区分「DOM 根本没渲染」和「渲染了但看不见」。
      * 只在诊断时读取，不影响页面行为。
      */

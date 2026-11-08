@@ -45,6 +45,12 @@ import com.fshake.dshremote.data.HostEntry
 class WebViewController {
     internal var webView: WebView? = null
 
+    /** 连按返回时只处理一次，避免一次按键被消费两次或连续回退两层。 */
+    private var dismissingOverlay = false
+
+    /** 每次发起或作废返回检查都递增；迟到的脚本回调据此丢弃。 */
+    private var backCheck = 0
+
     fun reload() {
         webView?.reload()
     }
@@ -72,6 +78,50 @@ class WebViewController {
             return
         }
         view.evaluateJavascript(script) { result -> onResult(result) }
+    }
+
+    /**
+     * 先关页面里的浮层（菜单 / 候选 / 对话框 / 抽屉 / 浮窗 / 右栏）。
+     *
+     * 网页里的这些层不进入 WebView 历史，goBack() 看不见它们，所以返回键要先问页面。
+     * 页面还没建好或脚本异常时回调 false，调用方继续走网页历史 / 回列表。
+     */
+    fun dismissOverlayIfOpen(onResult: (Boolean) -> Unit) {
+        if (dismissingOverlay) return
+        val view = webView
+        if (view == null) {
+            onResult(false)
+            return
+        }
+        dismissingOverlay = true
+        val id = ++backCheck
+        var settled = false
+        fun settle(dismissed: Boolean) {
+            if (settled || id != backCheck) return
+            settled = true
+            dismissingOverlay = false
+            onResult(dismissed)
+        }
+        // 回调迟迟不来（页面卡死、渲染进程崩溃）时按「没有浮层」放行：
+        // 否则标志永远为 true，之后每次返回都会被无声吞掉。
+        view.postDelayed({ settle(false) }, OVERLAY_TIMEOUT_MS)
+        view.evaluateJavascript(WebCompat.backDismissScript) { raw ->
+            val dismissed = WebBack.overlayDismissed(raw)
+            if (dismissed && !settled) WebDiagnostics.add("[back] overlay=${WebBack.overlayName(raw)}")
+            settle(dismissed)
+        }
+    }
+
+    /** WebView 被销毁时作废未完成的检查，避免返回键卡在「处理中」。 */
+    fun releaseView() {
+        webView = null
+        backCheck++
+        dismissingOverlay = false
+    }
+
+    private companion object {
+        /** 留给页面脚本的正常执行窗口；超过就当作没有浮层。 */
+        const val OVERLAY_TIMEOUT_MS = 1500L
     }
 }
 
@@ -343,7 +393,7 @@ fun DshWebView(
         // 脚本、长连接与渲染资源会一直跟着进程活着，所以这里显式销毁。
         onRelease = { view ->
             released.set(true)
-            controller.webView = null
+            controller.releaseView()
             WebDiagnostics.add("[release] ${runCatching { view.url }.getOrNull() ?: "unknown"}")
             runCatching {
                 view.stopLoading()

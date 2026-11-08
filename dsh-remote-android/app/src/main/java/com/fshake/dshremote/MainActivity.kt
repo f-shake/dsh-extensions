@@ -5,6 +5,8 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import com.fshake.dshremote.ui.common.installImeTargetListener
 import com.fshake.dshremote.ui.nav.AppRoot
@@ -23,7 +25,12 @@ class MainActivity : ComponentActivity() {
         val imeBottom = mutableIntStateOf(0)
         installImeTargetListener(window, imeBottom)
         setContent {
-            DshRemoteTheme {
+            val darkTheme = isSystemInDarkTheme()
+            // uiMode 在 configChanges 里：系统切换深浅色时 Activity 不会重建，
+            // 而窗口装饰（状态栏/导航栏图标明暗）只在 onCreate 设过一次。
+            // 以 Compose 主题为唯一来源重设一次，避免浅色主题下留着白色图标。
+            LaunchedEffect(darkTheme) { enableEdgeToEdge() }
+            DshRemoteTheme(darkTheme = darkTheme) {
                 AppRoot(container, imeBottom)
             }
         }

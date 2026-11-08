@@ -26,6 +26,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -129,6 +130,15 @@ fun WebScreen(
                             )
                         }
                     }
+                    IconButton(
+                        onClick = {
+                            failure = null
+                            controller.reload()
+                        },
+                        modifier = Modifier.size(CompactIconSize),
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "刷新")
+                    }
                     Box {
                         IconButton(
                             onClick = { menuExpanded = true },
@@ -140,14 +150,6 @@ fun WebScreen(
                             expanded = menuExpanded,
                             onDismissRequest = { menuExpanded = false },
                         ) {
-                            DropdownMenuItem(
-                                text = { Text("刷新") },
-                                onClick = {
-                                    menuExpanded = false
-                                    failure = null
-                                    controller.reload()
-                                },
-                            )
                             DropdownMenuItem(
                                 text = { Text("在浏览器打开") },
                                 onClick = {

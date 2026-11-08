@@ -145,13 +145,26 @@ fun AppRoot(container: AppContainer, imeBottom: MutableIntState) {
         if (webs[host.id] == null) openHost(host)
     }
 
-    // 返回：网页里优先网页自身回退，其次退回主机列表；其余页面直接回列表。
+    // 返回：网页里优先关掉最上层的浮层（菜单/对话框/侧栏/浮窗），
+    // 其次网页自身回退，最后退回主机列表；其余页面直接回列表。
     // 放在这里而不是各页面内部，避免常驻的网页页在列表上抢走返回键。
     BackHandler(enabled = route !is Route.Hosts) {
         when (route) {
             is Route.Web -> {
-                val controller = activeHostId?.let { webs[it]?.controller }
-                if (controller == null || !controller.goBack()) backToList()
+                val hostId = activeHostId
+                val controller = hostId?.let { webs[it]?.controller }
+                if (hostId == null || controller == null) {
+                    backToList()
+                } else {
+                    // 浮层是页面内部状态，不进入 WebView 历史，goBack() 看不见它们。
+                    controller.dismissOverlayIfOpen { dismissed ->
+                        if (dismissed) return@dismissOverlayIfOpen
+                        // 脚本往返期间可能已过期或退出登录：路由/前台主机变了就别再补一次返回，
+                        // 否则会把登录页顶回列表，还会把「清空上次主机」写进存储。
+                        if (route !is Route.Web || activeHostId != hostId) return@dismissOverlayIfOpen
+                        if (!controller.goBack()) backToList()
+                    }
+                }
             }
 
             is Route.Login -> backToList()
