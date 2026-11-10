@@ -47,7 +47,7 @@ Start-ScheduledTask -TaskName DshRestartOnce   # 20 秒后停旧起新
 | `vibe-phase-bar` | 双半边 | 独占；1 秒轮询待优化 |
 | `git-panel` | 双半边 | 独占，无冲突 |
 | `typo-proof` | 双半边 | 独占，`tools.register` 新签名兼容 |
-| `dsh-live-compact` 1.1.2 | 第三方 | `engines.dsh` 覆盖新版；侵入压缩内部，异常时优先怀疑它。1.1.x 起有插件设置页（宿主设置表单，`schemastery` peer 已由 profile 内的 3.19.0 满足），Windows 备份目录 ACL 写失败会熔断本进程后续备份 |
+| `dsh-live-compact` 1.1.4 | 第三方 | `engines.dsh` 覆盖新版；侵入压缩内部，异常时优先怀疑它。1.1.x 起有插件设置页（宿主设置表单，`schemastery` peer 已由 profile 内的 3.19.0 满足），Windows 备份目录 ACL 写失败会熔断本进程后续备份。1.1.3/1.1.4 修 #34：工具结果的 shadow/ACL 写不再在事件路径同步执行（排队 + `toolCallId` 去重），空闲维护的大段 catch-up 分批让出事件循环，Windows 阴影文件短暂忙时按 8 次上限退避重试；小切默认参数与配置项未变 |
 | `dsh-mnemon` 0.5.42 | 第三方 | `engines.dsh` 明确覆盖 0.2.2-rc.1（其 release note 也写了验证）；双半边，装完需重启。`pnpm peers check` 会报 cordis / typert-protocol / react 缺失，但宿主加载器能解析，实测工具与 Memory System 正常 |
 
 ## 官方已替代 / 已归档
