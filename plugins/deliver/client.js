@@ -30,8 +30,25 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 从工具结果的 meta 里读出投递信息。格式不对就返回 null，让卡片退回纯文本，
-     * 不要因为一条老记录把整个视图弄崩。
+     * 工具失败时把结果正文压成一行，给工具行当错误说明。
+     * @param {object} block - 工具结果节点。
+     * @returns {string} 说明文字。
+     */
+    function errorText(block) {
+      const content = block !== null && typeof block === 'object' && Array.isArray(block.content)
+        ? block.content
+        : [];
+      const text = content
+        .map((item) => (item !== null && typeof item === 'object' && item.type === 'text' ? item.text : ''))
+        .filter((item) => typeof item === 'string' && item !== '')
+        .join('\n')
+        .trim();
+      return text === '' ? '投递失败' : text.slice(0, 300);
+    }
+
+    /**
+     * 从工具结果的 meta 里读出投递信息。格式不对就返回 null，让工具行什么都不画，
+     * 不要因为一条老记录把视图弄崩。
      * @param {object} block - 工具结果节点。
      * @returns {{ deliveryId: string, sessionId: string, expiresAt: number, files: object[] } | null} 投递信息。
      */
@@ -49,7 +66,7 @@ window.__ModuleLoader__.load({
           name: item.name,
           sizeText: typeof item.sizeText === 'string' ? item.sizeText : '',
           url: item.url,
-          // 老记录没有绝对路径：预览按钮据此自己禁用，下载不受影响。
+          // 老记录没有绝对路径：预览按钮据此不发明地址，下载不受影响。
           absPath: typeof item.absPath === 'string' ? item.absPath : '',
         });
       }
@@ -61,27 +78,142 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /** 活着投递 id 的短缓存：历史回合的工具行会同时挂载，逐个去问就是几十个请求。 */
+    let liveIds = { at: 0, promise: null };
+    /** 正在飞的请求：同一批挂载共用一次，强制重拉也不例外。 */
+    let liveIdsInflight = null;
+
     /**
-     * 工具失败时把结果正文压成一行，给卡片当错误说明。
-     * @param {object} block - 工具结果节点。
-     * @returns {string} 说明文字。
+     * 宿主内存里还活着哪些投递。
+     *
+     * 连宿主的 `now` 一起带回来：判断「缺这条」是不是权威的，要靠它和工具结果的
+     * 时间比一比，而不是靠节流拍脑袋。
+     * @param {boolean} [force] - 忽略几秒内的缓存重拉一次。
+     * @returns {Promise<{ ids: Set<string>, now: number } | null>} 投递 id 集合与宿主时间；拉不到给 null。
      */
-    function errorText(block) {
-      const content = block !== null && typeof block === 'object' && Array.isArray(block.content)
-        ? block.content
-        : [];
-      const text = content
-        .map((item) => (item !== null && typeof item === 'object' && item.type === 'text' ? item.text : ''))
-        .filter((item) => typeof item === 'string' && item !== '')
-        .join('\n')
-        .trim();
-      return text === '' ? '投递失败' : text.slice(0, 300);
+    function liveDeliveryIds(force = false) {
+      if (liveIdsInflight !== null) return liveIdsInflight;
+      const now = Date.now();
+      if (!force && liveIds.promise !== null && now - liveIds.at < 5_000) return liveIds.promise;
+
+      const request = fetch(LIST_URL, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) throw new Error(String(response.status));
+          return response.json();
+        })
+        .then((payload) => {
+          const items =
+            payload !== null && typeof payload === 'object' && Array.isArray(payload.deliveries)
+              ? payload.deliveries
+              : [];
+          const served = payload !== null && typeof payload === 'object' ? Number(payload.now) : Number.NaN;
+          return { ids: new Set(items.map((item) => item.id)), now: served };
+        })
+        .catch(() => null);
+      liveIds = { at: now, promise: request };
+      liveIdsInflight = request;
+      request.then(() => {
+        if (liveIdsInflight === request) liveIdsInflight = null;
+      });
+      return request;
+    }
+
+    /** 这一页里被撤销过的投递 id：在途的活性检查晚回来时，不能把撤销翻回去。 */
+    const revokedIds = new Set();
+
+    /**
+     * 这条投递还在不在宿主内存里。
+     *
+     * 列表里没有它时分两种情况：列表是**这条结果之后**生成的（宿主时间 `now` 晚于
+     * 结果的 `time`），缺就是真缺；否则缓存可能比这条投递还旧，必须强制重拉一次再判。
+     * 用时间判而不是按秒数节流，是因为节流会把刚投的第二条也判成失效，和回合末尾
+     * 那组条上下打架。
+     * 每个 await 之后都要再看一眼撤销集合：撤销事件可能发生在请求还在飞的时候，
+     * 那时旧请求的答案已经不作数了。
+     * @param {string} deliveryId - 投递 id。
+     * @param {number} [resultTime] - 工具结果的时间戳（宿主时钟）。
+     * @returns {Promise<boolean>} 在（或无法判断）为 true。
+     */
+    async function deliveryIsLive(deliveryId, resultTime) {
+      if (revokedIds.has(deliveryId)) return false;
+      const cached = await liveDeliveryIds();
+      if (revokedIds.has(deliveryId)) return false;
+      if (cached === null) return true;
+      if (cached.ids.has(deliveryId)) return true;
+      if (Number.isFinite(resultTime) && Number.isFinite(cached.now) && cached.now >= resultTime) return false;
+      const fresh = await liveDeliveryIds(true);
+      if (revokedIds.has(deliveryId)) return false;
+      return fresh === null ? true : fresh.ids.has(deliveryId);
+    }
+
+    /**
+     * 工具行：活着的投递什么都不画，另外两种情况下它得出声。
+     *
+     * - 失败：一个文件都没投成，正文里没有条可看，错误得留在原处。
+     * - 已失效：宿主重启、记录过期或被撤销后，投递表里已经没有这条，回合末尾那组条
+     *   也就画不出来。这时退回工具结果里存着的 meta，画成同样的一行行、标「已失效」，
+     *   免得历史回合里这一轮交付彻底消失（原来的整张卡片就是这么活下来的）。
+     *
+     * 组件本身由宿主按工具名派发；这里返回 null 也不会退回通用卡片。
+     * @param {{ phase?: string, block?: object }} props - 工具视图属性。
+     * @returns {object | null} 元素。
+     */
+    function ToolRow(props) {
+      const block = props.phase === 'result' ? props.block : null;
+      const meta = block === null ? null : readMeta(block);
+      const deliveryId = meta === null ? '' : meta.deliveryId;
+      const [live, setLive] = React.useState(true);
+
+      React.useEffect(() => {
+        if (deliveryId === '') return undefined;
+        let alive = true;
+        deliveryIsLive(deliveryId, block.time).then((value) => {
+          if (alive) setLive(value);
+        });
+        return () => {
+          alive = false;
+        };
+      }, [deliveryId]);
+
+      // 同一页里撤销：事件比缓存快，直接把自己这条判死，别等下一次页面加载。
+      React.useEffect(() => {
+        if (deliveryId === '' || typeof window?.addEventListener !== 'function') return undefined;
+        const onRevoked = (event) => {
+          const revoked = event?.detail?.deliveryId;
+          if (typeof revoked === 'string' && revoked !== deliveryId) return;
+          setLive(false);
+        };
+        window.addEventListener(REVOKED_EVENT, onRevoked);
+        return () => {
+          if (typeof window.removeEventListener === 'function') window.removeEventListener(REVOKED_EVENT, onRevoked);
+        };
+      }, [deliveryId]);
+
+      if (block === null) return null;
+      if (block.isError === true) {
+        return h('div', { 'data-deliver': '', className: 'dlv-err' }, errorText(block));
+      }
+      if (meta === null || live) return null;
+
+      return h(
+        'div',
+        { 'data-deliver': '', className: 'dlv-tail' },
+        meta.files.map((file) =>
+          h(
+            'div',
+            { className: 'dlv-bar', key: String(file.index) },
+            h('span', { className: 'dlv-bar-name', title: file.name }, file.name),
+            h('span', { className: 'dlv-bar-meta' }, file.sizeText),
+            h('span', { className: 'dlv-bar-dead' }, '已失效'),
+          ),
+        ),
+      );
     }
 
     /**
      * 一个回合里创建的那些投递。
      *
-     * 回合末尾的卡片只能拿到回合的开始 / 结束时间（`turn.start.time`、`turn.end.time`），
+     * 回合末尾那组条只能拿到回合的开始 / 结束时间（`turn.start.time`、`turn.end.time`），
      * 投递记录里带的是 `createdAt`——两边对一下就能筛出「本回合投的」，不用让宿主
      * 额外记回合号。
      * @param {object[]} deliveries - `/deliver/list` 的条目。
@@ -99,6 +231,48 @@ window.__ModuleLoader__.load({
         if (!Number.isFinite(created) || created < start || created > end) return false;
         return Array.isArray(item.files) && item.files.length > 0;
       });
+    }
+
+    /**
+     * 侧栏撤销成功后广播的事件名：正文里的回合条据此重拉一次。
+     *
+     * 投递箱在右侧栏、回合条在正文，两边各拉各的列表却指向同一份数据；撤销后不通知，
+     * 正文会继续显示「还有 X 小时」和一个点下去才报「已失效」的按钮。
+     */
+    const REVOKED_EVENT = 'deliver:revoked';
+
+    /** 通知正文：某条投递刚被撤销。宿主环境里 window 一直在，测试替身可能没有事件接口。 */
+    function notifyRevoked(deliveryId) {
+      // 记下它：撤销前发出的活性检查可能还在飞，答案回来时不能把它判回「活着」。
+      if (typeof deliveryId === 'string' && deliveryId !== '') revokedIds.add(deliveryId);
+      // 缓存里还留着这条：清掉，重新挂载的工具行才会重新问一次。
+      liveIds = { at: 0, promise: null };
+      liveIdsInflight = null;
+      if (typeof window?.dispatchEvent !== 'function') return;
+      if (typeof window.CustomEvent !== 'function') return;
+      window.dispatchEvent(new window.CustomEvent(REVOKED_EVENT, { detail: { deliveryId } }));
+    }
+
+    /**
+     * 拉一次投递列表，筛出落在回合窗内的那些。
+     * @param {{ start: number, end?: number, sessionId?: string }} window - 回合窗与会话。
+     * @returns {Promise<object[]>} 投递条目；请求失败给空数组，正文里不留半截错误。
+     */
+    async function loadTurnDeliveries({ start, end, sessionId }) {
+      const query =
+        typeof sessionId === 'string' && sessionId !== '' ? `?session=${encodeURIComponent(sessionId)}` : '';
+      try {
+        const response = await fetch(`${LIST_URL}${query}`, { credentials: 'same-origin' });
+        if (!response.ok) throw new Error(String(response.status));
+        const payload = await response.json();
+        const items =
+          payload !== null && typeof payload === 'object' && Array.isArray(payload.deliveries)
+            ? payload.deliveries
+            : [];
+        return deliveriesInTurn(items, { start, end });
+      } catch {
+        return [];
+      }
     }
 
     /**
@@ -179,14 +353,7 @@ window.__ModuleLoader__.load({
       const style = document.createElement('style');
       style.id = STYLE_ID;
       style.textContent = [
-        // 版式对齐内置「交付」卡片：圆角、细描边、左侧类型色块、名称加粗、说明灰字。
-        '.dlv-card{box-sizing:border-box;display:flex;flex-direction:column;gap:5px;max-width:100%;',
-        'padding:10px 12px;border:1px solid var(--dsw-alias-border-l2,#ffffff14);border-radius:12px;',
-        'background:var(--dsw-specific-input-major,transparent);font-size:13px;line-height:1.5;',
-        'color:var(--dsw-alias-label-primary,#f9fafb)}',
-        '.dlv-card[data-deliver-state="revoked"]{opacity:.55}',
-        '.dlv-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}',
-        '.dlv-title{font-weight:600;font-size:13px}',
+        // 投递箱里的文件行：左侧类型色块、名称加粗、说明灰字，右侧预览与下载。
         '.dlv-row{display:flex;align-items:center;gap:10px;min-width:0;padding:2px 0}',
         '.dlv-tile{width:34px;height:34px;border-radius:8px;flex:0 0 auto;display:grid;place-items:center;',
         'color:#fff;font:600 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px}',
@@ -203,22 +370,21 @@ window.__ModuleLoader__.load({
         '.dlv-flag{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin-right:6px}',
         // 不能 display:none：读屏对「从隐藏变可见」的区域经常不播报，保留占位更稳。
         '.dlv-flag:empty{margin-right:0}',
-        '.dlv-foot{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding-top:2px;',
-        'color:var(--dsw-alias-label-tertiary,#8a8f98);font-size:11px}',
-        '.dlv-note{flex:1 1 auto;min-width:0;text-align:left}',
+        // 工具行的失败提示：没有投递成功时正文里没有条，这句是唯一的反馈。
+        '.dlv-err{margin:0;white-space:pre-wrap;word-break:break-word;',
+        'color:var(--dsw-alias-state-error-primary,#e05b5b);font-size:11px}',
         '.dlv-link{border:0;background:none;padding:0;cursor:pointer;font:inherit;font-size:11px;',
         'color:var(--dsw-alias-label-tertiary,#8a8f98)}',
         '.dlv-link:hover{text-decoration:underline;color:var(--dsw-alias-label-primary,#f9fafb)}',
         '.dlv-link[data-warn]{color:var(--dsw-alias-state-error-primary,#e05b5b)}',
-        // 回合末尾的紧凑下载条：文件名一行 + 下载按钮。与官方的交付卡并排时不抢视觉，
-        // 也不会把「同一个文件」画成两张卡片。
+        // 回合末尾那一组单行条：这是交付在正文里唯一的呈现，工具行不再画卡片。
         '.dlv-tail{display:flex;flex-direction:column;gap:6px;max-width:100%}',
         '.dlv-bar{display:flex;align-items:center;gap:8px;min-width:0;padding:5px 10px;border-radius:9px;',
         'border:1px solid var(--dsw-alias-border-l2,#ffffff14);background:var(--dsw-specific-input-major,transparent)}',
         '.dlv-bar-name{flex:1 1 auto;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
         '.dlv-bar-meta{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        '.dlv-err{margin:0;white-space:pre-wrap;word-break:break-word;',
-        'color:var(--dsw-alias-state-error-primary,#e05b5b);font-size:11px}',
+        // 历史回合里那条投递已经不在宿主内存：条还在，只是没什么可点的。
+        '.dlv-bar-dead{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
         '.dlv-box{box-sizing:border-box;display:flex;flex-direction:column;gap:12px;padding:10px;',
         'font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,#f9fafb)}',
         '.dlv-box-head{display:flex;align-items:center;justify-content:space-between;gap:8px;',
@@ -234,7 +400,7 @@ window.__ModuleLoader__.load({
     /**
      * 组件工厂。组件本身只用传进来的 React，不直接碰 DOM。
      * @param {{ openPreview?: (sessionId: string, file: object) => void }} deps - 预览入口（由宿主侧注入，测试里可替换）。
-     * @returns {{ DeliverRow: Function, DownloadBar: Function, BoxBody: Function, TurnTailCard: Function, FileRow: Function, FileTile: Function, DownloadButton: Function, PreviewButton: Function }} 组件。
+     * @returns {{ DownloadBar: Function, BoxBody: Function, TurnTailCard: Function, FileRow: Function, FileTile: Function, DownloadButton: Function, PreviewButton: Function }} 组件。
      */
     function createComponents(deps = {}) {
       const openPreview = typeof deps.openPreview === 'function' ? deps.openPreview : null;
@@ -259,7 +425,7 @@ window.__ModuleLoader__.load({
         }, [state]);
 
         async function onPreview() {
-          if (state === 'busy' || openPreview === null) return;
+          if (state === 'busy' || state === 'gone' || openPreview === null) return;
           if (typeof file.absPath !== 'string' || file.absPath === '') return;
           setState('busy');
           let next = 'idle';
@@ -419,15 +585,20 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 回合末尾的紧凑下载条。
+       * 回合末尾的单行条：这是交付在正文里唯一的呈现。
        *
-       * 只保留「下载」这一个动作，不再画文件缩略块、预览按钮和卡片外框：
-       * 预览与打开已由官方的交付卡和右侧栏承担，这里再画一遍就会和官方卡片
-       * 并排成两三张同款卡片（0.2.2 起 present 与 deliver 常见于同一轮）。
-       * @param {{ file: object, extra?: string }} props - 文件与附加说明。
+       * 一行里给全「文件名 + 大小 + 剩余有效期 + 预览 + 下载」，不再画类型色块与卡片外框；
+       * 投递箱里另有带色块的完整行。预览按钮只在拿到会话 id 与绝对路径时出现——老记录
+       * 缺这两样，按了也打不开，索性不给。
+       * @param {{ file: object, sessionId?: string, extra?: string }} props - 文件、所属会话与附加说明。
        * @returns {object} 元素。
        */
-      function DownloadBar({ file, extra }) {
+      function DownloadBar({ file, sessionId, extra }) {
+        const canPreview =
+          typeof file.absPath === 'string' &&
+          file.absPath !== '' &&
+          typeof sessionId === 'string' &&
+          sessionId !== '';
         return h(
           'div',
           { className: 'dlv-bar' },
@@ -437,96 +608,11 @@ window.__ModuleLoader__.load({
             { className: 'dlv-bar-meta' },
             extra === undefined || extra === '' ? file.sizeText : `${file.sizeText} · ${extra}`,
           ),
-          h(DownloadButton, { url: file.url }),
-        );
-      }
-
-      /**
-       * 对话里的投递卡片。
-       * @param {object} props - 工具视图属性。
-       * @returns {object | null} 元素。
-       */
-      function DeliverRow(props) {
-        const block = props.phase === 'result' ? props.block : null;
-        const [confirming, setConfirming] = React.useState(false);
-        const [revokeState, setRevokeState] = React.useState('idle');
-        const meta = block === null ? null : readMeta(block);
-
-        async function onRevoke() {
-          if (meta === null || revokeState === 'busy') return;
-          if (!confirming) {
-            setConfirming(true);
-            return;
-          }
-          setConfirming(false);
-          setRevokeState('busy');
-          try {
-            const response = await fetch(`/deliver/${encodeURIComponent(meta.deliveryId)}`, {
-              method: 'DELETE',
-              credentials: 'same-origin',
-            });
-            setRevokeState(response.ok ? 'done' : 'error');
-          } catch {
-            setRevokeState('error');
-          }
-        }
-
-        if (props.phase !== 'result') {
-          return h(
-            'div',
-            { 'data-deliver': '', className: 'dlv-card' },
-            h('div', { className: 'dlv-head' }, h('span', { className: 'dlv-title' }, '正在投递…')),
-          );
-        }
-
-        if (block.isError || meta === null) {
-          return h(
-            'div',
-            { 'data-deliver': '', className: 'dlv-card' },
-            h('div', { className: 'dlv-head' }, h('span', { className: 'dlv-title' }, '投递失败')),
-            h('pre', { className: 'dlv-err' }, errorText(block)),
-          );
-        }
-
-        const revoked = revokeState === 'done';
-        const remain = remainingText(meta.expiresAt, Date.now());
-        // 剩余时间每行已经写了，底部只在异常态出字，免得同一句话出现两遍。
-        // 撤销态也一样：行内的 extra 已经是「已撤销」。
-        const note = revoked ? '' : revokeState === 'error' ? '撤销失败，再试一次' : '';
-
-        return h(
-          'div',
-          {
-            'data-deliver': '',
-            className: 'dlv-card',
-            'data-deliver-state': revoked ? 'revoked' : 'ok',
-          },
-          meta.files.map((file) =>
-            h(FileRow, {
-              key: String(file.index),
-              file,
-              sessionId: typeof meta.sessionId === 'string' ? meta.sessionId : '',
-              disabled: revoked,
-              extra: revoked ? '已撤销' : remain,
-            }),
-          ),
           h(
-            'div',
-            { className: 'dlv-foot' },
-            h('span', { className: 'dlv-note' }, note),
-            revoked
-              ? null
-              : h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'dlv-link',
-                    'data-warn': '',
-                    disabled: revokeState === 'busy',
-                    onClick: onRevoke,
-                  },
-                  confirming ? '确认撤销？' : '撤销',
-                ),
+            'span',
+            { className: 'dlv-act' },
+            canPreview ? h(PreviewButton, { file, sessionId }) : null,
+            h(DownloadButton, { url: file.url }),
           ),
         );
       }
@@ -577,10 +663,11 @@ window.__ModuleLoader__.load({
           if (revoking === id) return;
           setRevoking(id);
           try {
-            await fetch(`/deliver/${encodeURIComponent(id)}`, {
+            const response = await fetch(`/deliver/${encodeURIComponent(id)}`, {
               method: 'DELETE',
               credentials: 'same-origin',
             });
+            if (response.ok) notifyRevoked(id);
           } catch {
             // 失败也要刷新：列表会如实显示它还在。
           }
@@ -656,11 +743,11 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 回合末尾的投递卡片。
+       * 回合末尾那一组投递条：交付在正文里唯一的呈现。
        *
-       * 正文里看不到工具行的用户（尤其是手机上）应该在这里一眼看到「这一轮交付了什么」。
-       * 这个槽位在 `turn/start` 就挂载，所以必须等回合结束（`turn.end` 存在）才去拉列表——
-       * 否则拉回来的是「本回合还没有投递」的那份，短回合就永远不显示卡片。
+       * 这个槽位只对**已结束**的回合存在（`turn-tail` 节点由 `turn/end` 建出来），
+       * 所以这里拉的必然是一次定稿，没有「回合进行中先画一版」这种可能。
+       * 侧栏撤销后重拉一次，免得正文比投递箱晚一步。
        * 列表按会话过滤，两个会话的回合时间重叠时不会互相串。
        * @param {{ turn?: { start?: { time?: number }, end?: { time?: number } }, sessionId?: string }} props - 回合末尾槽位的属性。
        * @returns {object | null} 元素。
@@ -669,44 +756,42 @@ window.__ModuleLoader__.load({
         const start = Number(props.turn?.start?.time);
         const end = Number(props.turn?.end?.time);
         const sessionId = typeof props.sessionId === 'string' ? props.sessionId : '';
-        const [state, setState] = React.useState({ status: 'idle', deliveries: [] });
+        const [deliveries, setDeliveries] = React.useState([]);
+        const [tick, setTick] = React.useState(0);
 
         React.useEffect(() => {
-          if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined;
+          if (!Number.isFinite(start)) return undefined;
           let alive = true;
-          const query = sessionId === '' ? '' : `?session=${encodeURIComponent(sessionId)}`;
-          fetch(`${LIST_URL}${query}`, { credentials: 'same-origin' })
-            .then((response) => {
-              if (!response.ok) throw new Error(String(response.status));
-              return response.json();
-            })
-            .then((payload) => {
-              if (!alive) return;
-              const items =
-                payload !== null && typeof payload === 'object' && Array.isArray(payload.deliveries)
-                  ? payload.deliveries
-                  : [];
-              setState({ status: 'ready', deliveries: deliveriesInTurn(items, { start, end }) });
-            })
-            .catch(() => {
-              if (alive) setState({ status: 'error', deliveries: [] });
-            });
+          loadTurnDeliveries({ start, end, sessionId }).then((items) => {
+            if (alive) setDeliveries(items);
+          });
           return () => {
             alive = false;
           };
-        }, [start, end, sessionId]);
+        }, [start, end, sessionId, tick]);
 
-        if (state.deliveries.length === 0) return null;
+        // 撤销发生在右侧栏，正文收不到任何数据变化；靠这条事件把自己拉回一致。
+        React.useEffect(() => {
+          if (typeof window?.addEventListener !== 'function') return undefined;
+          const onRevoked = () => setTick((value) => value + 1);
+          window.addEventListener(REVOKED_EVENT, onRevoked);
+          return () => {
+            if (typeof window.removeEventListener === 'function') window.removeEventListener(REVOKED_EVENT, onRevoked);
+          };
+        }, []);
+
+        if (deliveries.length === 0) return null;
 
         const rows = [];
         const now = Date.now();
-        for (const delivery of state.deliveries) {
+        for (const delivery of deliveries) {
           const files = Array.isArray(delivery.files) ? delivery.files : [];
           for (const file of files) {
             rows.push(
               h(DownloadBar, {
                 key: `${delivery.id}-${file.index}`,
                 file,
+                sessionId: delivery.sessionId,
                 extra: remainingText(delivery.expiresAt, now),
               }),
             );
@@ -720,7 +805,7 @@ window.__ModuleLoader__.load({
         );
       }
 
-      return { DeliverRow, DownloadBar, BoxBody, TurnTailCard, FileRow, FileTile, DownloadButton, PreviewButton };
+      return { DownloadBar, BoxBody, TurnTailCard, FileRow, FileTile, DownloadButton, PreviewButton };
     }
 
     return {
@@ -745,11 +830,12 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('tool.call.toolview', () =>
           ctx.slots.register(
             { name: 'tool.call.toolview', key: TOOL_NAME },
-            components.DeliverRow,
+            ToolRow,
           ),
         );
 
-        // 回合末尾的卡片：与内置「交付」卡片同一个槽位，正文下方就能看到。
+        // 回合末尾那一组：与内置「交付」卡片同一个槽位，是活着的投递在正文里的呈现。
+        // 记录已经不在宿主内存时（重启、过期、撤销），工具行会退回 meta 自己画一组「已失效」。
         ctx.slots.inject('conversation.chat.turnTail', () =>
           ctx.slots.register(
             {
@@ -790,9 +876,13 @@ window.__ModuleLoader__.load({
       /** 只给单测用：纯函数与组件工厂。 */
       __test: {
         remainingText,
-        readMeta,
         errorText,
+        readMeta,
+        deliveryIsLive,
+        ToolRow,
+        notifyRevoked,
         deliveriesInTurn,
+        loadTurnDeliveries,
         fileExt,
         tileTone,
         encodeSegment,

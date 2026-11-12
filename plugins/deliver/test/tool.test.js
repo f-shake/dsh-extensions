@@ -225,8 +225,8 @@ test("工具：给模型看的文字含文件名与大小，但不含站内路�
     assert.equal(content[0].type, "text");
     assert.match(content[0].text, /已投递 1 个文件/);
     assert.match(content[0].text, /a\.txt（1 B）/);
-    assert.match(content[0].text, /投递卡片/);
-    // 路径写进正文会被渲染成文件链接而不是下载，必须由卡片承载。
+    assert.match(content[0].text, /投递条/);
+    // 路径写进正文会被渲染成文件链接而不是下载，必须由投递条承载。
     assert.ok(!content[0].text.includes("/deliver/"));
   });
 });

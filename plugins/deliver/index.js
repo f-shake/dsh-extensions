@@ -8,7 +8,7 @@
  * 安装包只会让磁盘翻倍，还要额外维护清理策略。
  *
  * 为什么投递表放内存：它只服务当前活着的宿主进程。重启后内存表清空，旧链接会变成
- * 404「这条投递不存在」，卡片把它显示为「已失效」——这比落盘一份可能过期的路径表
+ * 404「这条投递不存在」，正文里那一轮也不会再有投递条——这比落盘一份可能过期的路径表
  * 更安全，也不用处理清理。
  */
 
@@ -288,7 +288,7 @@ export function createStore(options = {}) {
     /**
      * 建一条投递。
      * @param {object[]} files - 已解析的文件。
-     * @param {string} [sessionId] - 发起投递的会话；只给回合末尾的卡片筛选用。
+     * @param {string} [sessionId] - 发起投递的会话；只给回合末尾那组条筛选用。
      * @returns {object} 新记录。
      */
     create(files, sessionId) {
@@ -357,7 +357,7 @@ export function createStore(options = {}) {
 }
 
 /**
- * 从 agent 身上取会话 id。回合末尾的卡片按它筛出本会话的投递。
+ * 从 agent 身上取会话 id。回合末尾那组条按它筛出本会话的投递。
  * @param {object} agent - 实时 agent。
  * @returns {string | undefined} 会话 id。
  */
@@ -632,13 +632,13 @@ export function createTool({ store, limits, resolveCwd }) {
   return {
     name: "deliver",
     description:
-      "把宿主上的文件投递成可下载的条目：用户会在对话里的投递卡片上看到文件名、大小和下载按钮，点一下就从这台机器下载到他的手机或电脑。远程使用 dsh 时，凡是用户要「拿走」的产物（报告、导出数据、截图、安装包、日志）都用它；这些文件可能在仓库外，也可以给绝对路径。一次最多投递 20 个文件。投递有有效期，用户可随时撤销。",
+      "把宿主上的文件投递成可下载的条目：用户会在回合末尾的投递条上看到文件名、大小、预览和下载按钮，点一下就从这台机器下载到他的手机或电脑。远程使用 dsh 时，凡是用户要「拿走」的产物（报告、导出数据、截图、安装包、日志）都用它；这些文件可能在仓库外，也可以给绝对路径。一次最多投递 20 个文件。投递有有效期，用户可随时撤销。",
     parameters: {
       type: "object",
       properties: {
         files: {
           type: "array",
-          description: "要投递的文件；按给定顺序出现在卡片里",
+          description: "要投递的文件；按给定顺序出现在投递条里",
           items: {
             type: "object",
             properties: {
@@ -709,8 +709,8 @@ export function createTool({ store, limits, resolveCwd }) {
             lines.push(`- ${item.path === "" ? "（空路径）" : item.path}：${item.reason}`);
           }
         }
-        // 卡片才是下载入口；让模型把站内路径写进正文，会被渲染成文件链接而不是下载。
-        lines.push("下载入口在对话里的投递卡片上，回复里不要贴这些路径。");
+        // 投递条才是下载入口；让模型把站内路径写进正文，会被渲染成文件链接而不是下载。
+        lines.push("下载入口在回合末尾的投递条上，回复里不要贴这些路径。");
         return [{ type: "text", text: lines.join("\n") }];
       },
       presentationMeta(_args, value) {

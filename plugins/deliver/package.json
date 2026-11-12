@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "文件投递：把宿主上的文件变成登录态下可下载的卡片，并在右侧栏提供一个投递箱",
+  "description": "文件投递：把宿主上的文件变成登录态下可下载的投递条，并在右侧栏提供一个投递箱",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"
