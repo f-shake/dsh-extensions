@@ -8,6 +8,7 @@ dsh-extensions/
 ├── dsh-auth/                  DSH 公网访问网关：密码 + TOTP 双因子（Python / FastAPI）
 ├── dsh-host/                  本机实例的启动与接入：启动器、防火墙/portproxy、profile patch
 ├── skills/                    技能源文件（同步到 ~/.dsh/skills 生效）：vibe coding 系列 + notify-mail + asr-repair
+├── scripts/                   跨机同步用：技能同步（sync-skills.ps1）、更新检查（check-updates.ps1）
 └── plugins/                   DSH 客户端插件（Cordis bundle）
     ├── session-activity-order/ 侧栏排序：活跃工作区/会话自动置顶
     ├── header-compact/        窄屏标题行收紧：计数文案换短写法、隐藏手机端无用的「在本地打开」
@@ -191,9 +192,37 @@ dsh plugin --profile aa add dsh-mnemon@0.5.42   # 版本与子模块的 tag 保�
 - 必须**先删后拷**：直接覆盖会留下上一版已删除的文件
 - DSH 监视 `~/.dsh/skills/`，改完即生效；正文每次加载重读，不必重启
 
+## 跨机器同步
+
+这个仓库在多台电脑之间同步 DSH 的插件、技能和启动器配置。**拉之前先问一句「我落后了什么」**：
+
+```powershell
+.\scripts\check-updates.ps1            # fetch 一次：落后几个提交、涉及哪些部件、每个部件怎么生效
+.\scripts\check-updates.ps1 -NoFetch   # 离线，用上次 fetch 的引用比较
+```
+
+脚本只读——除了 `git fetch`（更新远端引用）不动任何东西，pull 由你自己决定。
+它把差异路径归到部件，再按「技能是 junction 还是副本 / 插件要不要重启 dsh /
+子模块要不要 update / APK 要不要重出包」给出该做什么。最后这几件事 `git log` 不会告诉你，
+所以另有一份 [CHANGELOG.md](CHANGELOG.md)：每次影响使用的改动记下「变了什么」和「拉取后要做什么」。
+
+拉取：
+
+```powershell
+git pull --recurse-submodules
+```
+
+`plugins/external/` 是子模块，不带 `--recurse-submodules` 拉下来就是空目录。
+
+**更新日志的写法**：改动的**同一次提交里**在 [CHANGELOG.md](CHANGELOG.md) 顶部加一条，
+字段固定为「部件 / 变了什么 / 要动手」——没有动手项也要写「无」，省略会被读成「忘了写」。
+一条对应一次推送，不按文件拆。落后几条不靠数条目：脚本按 `git rev-list --count HEAD..origin/master`
+给准确数字，这份日志负责解释它们各自要不要动手。重构、格式化、改注释不记。
+
 ## 版本管理约定
 
 - 三个部件版本号各自独立，不强行对齐
 - 提交信息按部件加前缀：`android:` / `auth:` / `plugin(mobile-fit):` 等
+- 影响使用的改动，在同一次提交里更新 [CHANGELOG.md](CHANGELOG.md)；纯重构、格式化不记
 - 任何密钥、口令、私钥、TOTP 二维码都不入库
 - 升级 DSH 前后的核对结论、已归档插件与验证清单见 [COMPAT.md](COMPAT.md)
