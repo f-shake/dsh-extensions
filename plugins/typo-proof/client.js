@@ -329,168 +329,254 @@ window.__ModuleLoader__.load({
       };
     }
 
-    /** 注入一次样式。插件反复加载时不要重复插。 */
+    /**
+     * 面板样式表。
+     *
+     * 抽成常量是为了热重载：插件重载时 `<style>` 还挂在老页面上，
+     * 只「插一次」的话新增的类名永远拿不到样式——复制按钮会长成浏览器默认按钮、
+     * 内部折叠会露出原生三角。所以每次 ensureStyle 都要把内容对齐。
+     */
+    const STYLE_TEXT = [
+      // 全部选择器都挂在 data-typo-proof 下：宿主「交付」卡片与「Git」面板都用了自己的前缀，
+      // 不隔离的话同名类（.tp-title、.tp-row）会互相踩。
+      '[data-typo-proof], [data-typo-proof] *{box-sizing:border-box}',
+      '[data-typo-proof]{font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,#14181f)}',
+      '[data-typo-proof] p{margin:0}',
+      // 面板：头部 / 可滚正文 / 固定底部三层。正文必须 min-height:0，
+      // 否则 flex 子项按内容撑开，底部的下载按钮会被顶出可视区。
+      '.tp-panel{display:flex;flex-direction:column;height:100%;min-height:0}',
+      '.tp-head{display:flex;flex-direction:column;gap:3px;padding:10px 12px 8px;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18))}',
+      '.tp-head-row{display:flex;align-items:center;gap:8px;min-width:0}',
+      '.tp-title{font-size:13px;font-weight:600;flex:0 0 auto}',
+      '.tp-sub{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.tp-badge{flex:0 0 auto;margin-left:auto;font-size:10px;padding:0 6px;border-radius:999px;line-height:16px;',
+      'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.24));color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      // 头部右上角一组：演示标记 + 设置入口，整组靠右。
+      '.tp-head-tools{margin-left:auto;flex:0 0 auto;display:flex;align-items:center;gap:10px;min-width:0}',
+      '.tp-head-tools .tp-badge{margin-left:0}',
+      '.tp-body{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:10px 12px}',
+      '.tp-foot{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18))}',
+      '.tp-foot-note{flex:1 1 auto;min-width:0;font-size:10px;color:var(--dsw-alias-label-tertiary,#8a8f98);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      // 按钮：主按钮只有「开始检查」「下载副本」，其余一律描边。
+      '.tp-btn{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:4px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.28));',
+      'border-radius:8px;background:none;padding:4px 12px;cursor:pointer;font:inherit;font-size:12px;line-height:20px;',
+      'color:var(--dsw-alias-label-primary,#14181f)}',
+      '.tp-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12))}',
+      '.tp-btn:disabled{opacity:.45;cursor:default}',
+      // 主按钮用绝对色：--dsw-alias-brand-primary 在深色主题里是近白（它表示“高对比前景色”），
+      // 当底色再配白字就成了白底白字。--dsw-static-deepseek-500 在深浅两套里都是同一个蓝。
+      '.tp-btn[data-variant="primary"]{border-color:transparent;background:var(--dsw-static-deepseek-500,#4176e6);color:#fff}',
+      '.tp-btn[data-variant="primary"]:hover:not(:disabled){background:var(--dsw-static-deepseek-500,#4176e6);filter:brightness(1.08)}',
+      '.tp-btn[data-size="sm"]{padding:2px 10px;font-size:11px;line-height:18px}',
+      '.tp-link{flex:0 0 auto;border:0;background:none;padding:0;font:inherit;font-size:10px;line-height:1.4;',
+      'color:var(--dsw-alias-label-tertiary,#8a8f98);cursor:pointer;text-decoration:underline;text-underline-offset:2px}',
+      '.tp-link:hover{color:var(--dsw-alias-label-primary,#14181f)}',
+      // 进度
+      '.tp-prog{display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px}',
+      '.tp-bar{height:4px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.2));overflow:hidden}',
+      '.tp-bar > i{display:block;height:100%;border-radius:999px;background:var(--dsw-static-deepseek-500,#4176e6);transition:width .25s ease}',
+      '.tp-prog-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      '.tp-prog-row b{font-weight:500;color:var(--dsw-alias-label-secondary,#4b5563);font-variant-numeric:tabular-nums}',
+      '.tp-stage{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);font-variant-numeric:tabular-nums}',
+      '.tp-actions{display:flex;gap:6px}',
+      // 统计格
+      '.tp-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}',
+      '.tp-stat{padding:6px 2px;text-align:center;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px}',
+      '.tp-stat b{display:block;font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}',
+      '.tp-stat span{display:block;font-size:10px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      '.tp-stat[data-tone="ok"] b{color:var(--dsw-alias-state-success-primary,#2e7d32)}',
+      '.tp-stat[data-tone="warn"] b{color:var(--dsw-alias-state-warn-primary,#b26a00)}',
+      '.tp-stat[data-tone="mute"] b{color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      // 筛选页签
+      '.tp-chips{display:flex;flex-wrap:wrap;gap:6px}',
+      '.tp-chip{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.24));border-radius:999px;background:none;',
+      'padding:2px 10px;font:inherit;font-size:11px;line-height:18px;cursor:pointer;color:var(--dsw-alias-label-secondary,#4b5563)}',
+      '.tp-chip:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))}',
+      '.tp-chip[aria-pressed="true"]{border-color:var(--dsw-static-deepseek-500,#4176e6);color:var(--dsw-static-deepseek-500,#4176e6);',
+      'background:color-mix(in srgb,var(--dsw-static-deepseek-500,#4176e6) 12%,transparent)}',
+      // 候选行：卡片本身就展开，不再一条条点开；前/后与三次采样收在卡片内部的 .tp-detail 里。
+      '.tp-list{display:flex;flex-direction:column;gap:6px}',
+      '.tp-issue{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;overflow:hidden}',
+      '.tp-issue-head{display:flex;align-items:center;gap:8px;min-width:0;padding:8px 10px 0}',
+      '.tp-issue-meta{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto}',
+      '.tp-seg{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);font-variant-numeric:tabular-nums}',
+      '.tp-hits{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);font-variant-numeric:tabular-nums}',
+      '.tp-pill{flex:0 0 auto;margin-left:auto;font-size:10px;padding:0 7px;border-radius:999px;line-height:16px;border:1px solid}',
+      '.tp-pill[data-state="confirmed"]{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#2e7d32) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#2e7d32) 10%,transparent)}',
+      '.tp-pill[data-state="disputed"]{color:var(--dsw-alias-state-warn-primary,#b26a00);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#b26a00) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#b26a00) 10%,transparent)}',
+      '.tp-pill[data-state="rejected"]{color:var(--dsw-alias-label-tertiary,#8a8f98);border-color:var(--dsw-alias-border-l2,rgba(128,128,128,.3))}',
+      '.tp-issue-body{padding:2px 10px 8px}',
+      '.tp-full{margin:2px 0 6px;font-size:13px;line-height:1.7;word-break:break-word;color:var(--dsw-alias-label-primary,#14181f)}',
+      '.tp-del{color:var(--dsw-alias-state-error-primary,#d33);text-decoration:line-through;background:var(--dsw-alias-code-diff-deleted,rgba(211,47,47,.13));border-radius:3px;padding:0 1px}',
+      '.tp-ins{color:var(--dsw-alias-state-success-primary,#2e7d32);font-weight:600;background:var(--dsw-alias-code-diff-added,rgba(46,125,50,.14));border-radius:3px;padding:0 1px}',
+      // 否决项：被模型点名的字加虚线下划线，既不划掉也不变绿——原文一个字都不改。
+      '.tp-hint{border-bottom:1px dashed var(--dsw-alias-state-warn-primary,#b26a00);padding-bottom:1px}',
+      '.tp-note{margin:6px 0 0;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);line-height:1.55}',
+      // 四个复制按钮：每张卡片都能把四处文字单独拿走。
+      '.tp-copy{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin:2px 0 6px}',
+      '.tp-copy-btn{flex:0 0 auto;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.26));border-radius:6px;background:none;',
+      'padding:0 6px;font:inherit;font-size:10px;line-height:16px;cursor:pointer;color:var(--dsw-alias-label-secondary,#4b5563)}',
+      '.tp-copy-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,#14181f)}',
+      '.tp-copy-btn:disabled{opacity:.4;cursor:default}',
+      '.tp-copy-ok{flex:0 0 auto;font-size:10px;color:var(--dsw-alias-state-success-primary,#2e7d32)}',
+      // 卡片内部的折叠：前/后与三次采样。原生 details 自带键盘操作，不用自己写开关状态。
+      '.tp-detail{margin:0;padding-top:4px;border-top:.5px dashed var(--dsw-alias-border-l2,rgba(128,128,128,.26))}',
+      '.tp-detail > summary{display:flex;align-items:center;gap:5px;cursor:pointer;list-style:none;',
+      'font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      '.tp-detail > summary::-webkit-details-marker{display:none}',
+      '.tp-detail > summary::before{content:"▸";font-size:9px;line-height:1}',
+      '.tp-detail[open] > summary::before{content:"▾"}',
+      '.tp-detail > summary:hover{color:var(--dsw-alias-label-primary,#14181f)}',
+      '.tp-context{margin:6px 0 0;padding-left:8px;border-left:2px solid var(--dsw-alias-border-l2,rgba(128,128,128,.24));',
+      'font-size:11px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#8a8f98);white-space:pre-wrap;word-break:break-word}',
+      '.tp-samples{display:flex;flex-direction:column;gap:2px;margin-top:8px;font-size:11px;line-height:1.5}',
+      '.tp-sample{display:flex;gap:6px;color:var(--dsw-alias-label-secondary,#4b5563)}',
+      '.tp-sample-tag{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#8a8f98);font-variant-numeric:tabular-nums}',
+      // 空态与错误态
+      '.tp-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px 6px;text-align:center}',
+      '.tp-empty-icon{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;',
+      'background:color-mix(in srgb,var(--dsw-static-deepseek-500,#4176e6) 12%,transparent);color:var(--dsw-static-deepseek-500,#4176e6)}',
+      '.tp-empty p{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f98);line-height:1.65;max-width:260px}',
+      '.tp-params{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;width:100%;margin-top:2px;text-align:left;',
+      'padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;font-size:11px}',
+      '.tp-params dt{color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      '.tp-params dd{margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,#4b5563);font-variant-numeric:tabular-nums}',
+      '.tp-error{padding:10px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#d33) 40%,transparent);',
+      'border-radius:10px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d33) 8%,transparent);',
+      'font-size:12px;color:var(--dsw-alias-state-error-primary,#d33);line-height:1.6}',
+      // 设置表单：字段竖排，两个数字并排，其余整行。
+      '.tp-input-row{display:flex;align-items:center;gap:6px;min-width:0}',
+      '.tp-input-row .tp-input{flex:1 1 auto;min-width:0}',
+      '.tp-picker{display:flex;flex-direction:column;gap:8px;min-height:0;flex:1 1 auto}',
+      '.tp-picker-bar{display:flex;align-items:center;gap:8px;min-width:0}',
+      '.tp-picker-path{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
+      'font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      '.tp-picker-list{flex:1 1 auto;min-height:120px;overflow:auto;display:flex;flex-direction:column;gap:1px;',
+      'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;padding:4px}',
+      '.tp-picker-row{display:flex;align-items:center;gap:8px;width:100%;padding:5px 8px;border:0;border-radius:7px;',
+      'background:none;font:inherit;font-size:12px;color:inherit;cursor:pointer;text-align:left}',
+      '.tp-picker-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))}',
+      '.tp-picker-row[data-selected="true"]{background:color-mix(in srgb,var(--dsw-static-deepseek-500,#4176e6) 14%,transparent);',
+      'color:var(--dsw-static-deepseek-500,#4176e6)}',
+      '.tp-picker-icon{flex:0 0 auto;font-size:9px;line-height:16px;padding:0 5px;border-radius:5px;',
+      'background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      '.tp-picker-icon[data-kind="docx"]{background:color-mix(in srgb,var(--dsw-static-deepseek-500,#4176e6) 18%,transparent);',
+      'color:var(--dsw-static-deepseek-500,#4176e6)}',
+      '.tp-picker-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.tp-form{display:flex;flex-direction:column;gap:10px}',
+      // 空态里那块表单要占满宽度：父级 align-items:center 会把输入框压成内容宽度。
+      '.tp-empty .tp-form{width:100%;text-align:left}',
+      '.tp-field{display:flex;flex-direction:column;gap:3px;min-width:0}',
+      '.tp-field > label{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      '.tp-input{box-sizing:border-box;width:100%;height:28px;padding:0 8px;border-radius:8px;',
+      'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.28));background:var(--dsw-alias-bg-base,#fff);',
+      'color:var(--dsw-alias-label-primary,#14181f);font:inherit;font-size:12px;outline:none}',
+      '.tp-input:focus{border-color:var(--dsw-static-deepseek-500,#4176e6)}',
+      '.tp-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}',
+      '.tp-check{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary,#4b5563)}',
+      '.tp-check input{width:14px;height:14px;margin:0}',
+      '.tp-help{margin:0;font-size:10px;line-height:1.55;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      '.tp-form-actions{display:flex;justify-content:flex-end;gap:8px;padding-top:2px}',
+      // 对话里的工具卡片
+      '.tp-card{box-sizing:border-box;display:flex;flex-direction:column;gap:8px;max-width:100%;padding:10px 12px;',
+      'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.22));border-radius:12px;',
+      'background:var(--dsw-specific-input-major,transparent);font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,#14181f)}',
+      '.tp-card-head{display:flex;align-items:baseline;gap:8px;min-width:0}',
+      '.tp-card-title{font-weight:600;font-size:13px;flex:0 0 auto}',
+      '.tp-card-file{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f98);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.tp-card-tag{flex:0 0 auto;font-size:10px;padding:0 6px;border-radius:999px;line-height:16px;',
+      'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.24));color:var(--dsw-alias-label-tertiary,#8a8f98)}',
+      '.tp-card-line{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;font-size:12px;color:var(--dsw-alias-label-secondary,#4b5563)}',
+      '.tp-card-line b{font-weight:600;font-variant-numeric:tabular-nums}',
+      '.tp-card-foot{display:flex;align-items:center;gap:8px}',
+      '.tp-card-err{margin:0;white-space:pre-wrap;word-break:break-word;font-size:11px;color:var(--dsw-alias-state-error-primary,#d33)}',
+    ].join('');
+
+    /**
+     * 注入样式。已经插过就换内容，不重复插。
+     */
     function ensureStyle() {
-      if (document.getElementById(STYLE_ID) !== null) return;
+      const existing = document.getElementById(STYLE_ID);
+      if (existing !== null) {
+        if (existing.textContent !== STYLE_TEXT) existing.textContent = STYLE_TEXT;
+        return;
+      }
       const style = document.createElement('style');
       style.id = STYLE_ID;
-      style.textContent = [
-        // 全部选择器都挂在 data-typo-proof 下：宿主「交付」卡片与「Git」面板都用了自己的前缀，
-        // 不隔离的话同名类（.tp-title、.tp-row）会互相踩。
-        '[data-typo-proof], [data-typo-proof] *{box-sizing:border-box}',
-        '[data-typo-proof]{font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,#14181f)}',
-        '[data-typo-proof] p{margin:0}',
-        // 面板：头部 / 可滚正文 / 固定底部三层。正文必须 min-height:0，
-        // 否则 flex 子项按内容撑开，底部的下载按钮会被顶出可视区。
-        '.tp-panel{display:flex;flex-direction:column;height:100%;min-height:0}',
-        '.tp-head{display:flex;flex-direction:column;gap:3px;padding:10px 12px 8px;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18))}',
-        '.tp-head-row{display:flex;align-items:center;gap:8px;min-width:0}',
-        '.tp-title{font-size:13px;font-weight:600;flex:0 0 auto}',
-        '.tp-sub{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-        '.tp-badge{flex:0 0 auto;margin-left:auto;font-size:10px;padding:0 6px;border-radius:999px;line-height:16px;',
-        'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.24));color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        // 头部右上角一组：演示标记 + 设置入口，整组靠右。
-        '.tp-head-tools{margin-left:auto;flex:0 0 auto;display:flex;align-items:center;gap:10px;min-width:0}',
-        '.tp-head-tools .tp-badge{margin-left:0}',
-        '.tp-body{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:10px 12px}',
-        '.tp-foot{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18))}',
-        '.tp-foot-note{flex:1 1 auto;min-width:0;font-size:10px;color:var(--dsw-alias-label-tertiary,#8a8f98);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-        // 按钮：主按钮只有「开始检查」「下载副本」，其余一律描边。
-        '.tp-btn{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:4px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.28));',
-        'border-radius:8px;background:none;padding:4px 12px;cursor:pointer;font:inherit;font-size:12px;line-height:20px;',
-        'color:var(--dsw-alias-label-primary,#14181f)}',
-        '.tp-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12))}',
-        '.tp-btn:disabled{opacity:.45;cursor:default}',
-        // 主按钮用绝对色：--dsw-alias-brand-primary 在深色主题里是近白（它表示“高对比前景色”），
-        // 当底色再配白字就成了白底白字。--dsw-static-deepseek-500 在深浅两套里都是同一个蓝。
-        '.tp-btn[data-variant="primary"]{border-color:transparent;background:var(--dsw-static-deepseek-500,#4176e6);color:#fff}',
-        '.tp-btn[data-variant="primary"]:hover:not(:disabled){background:var(--dsw-static-deepseek-500,#4176e6);filter:brightness(1.08)}',
-        '.tp-btn[data-size="sm"]{padding:2px 10px;font-size:11px;line-height:18px}',
-        '.tp-link{flex:0 0 auto;border:0;background:none;padding:0;font:inherit;font-size:10px;line-height:1.4;',
-        'color:var(--dsw-alias-label-tertiary,#8a8f98);cursor:pointer;text-decoration:underline;text-underline-offset:2px}',
-        '.tp-link:hover{color:var(--dsw-alias-label-primary,#14181f)}',
-        // 进度
-        '.tp-prog{display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px}',
-        '.tp-bar{height:4px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.2));overflow:hidden}',
-        '.tp-bar > i{display:block;height:100%;border-radius:999px;background:var(--dsw-static-deepseek-500,#4176e6);transition:width .25s ease}',
-        '.tp-prog-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        '.tp-prog-row b{font-weight:500;color:var(--dsw-alias-label-secondary,#4b5563);font-variant-numeric:tabular-nums}',
-        '.tp-stage{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);font-variant-numeric:tabular-nums}',
-        '.tp-actions{display:flex;gap:6px}',
-        // 统计格
-        '.tp-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}',
-        '.tp-stat{padding:6px 2px;text-align:center;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px}',
-        '.tp-stat b{display:block;font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}',
-        '.tp-stat span{display:block;font-size:10px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        '.tp-stat[data-tone="ok"] b{color:var(--dsw-alias-state-success-primary,#2e7d32)}',
-        '.tp-stat[data-tone="warn"] b{color:var(--dsw-alias-state-warn-primary,#b26a00)}',
-        '.tp-stat[data-tone="mute"] b{color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        // 筛选页签
-        '.tp-chips{display:flex;flex-wrap:wrap;gap:6px}',
-        '.tp-chip{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.24));border-radius:999px;background:none;',
-        'padding:2px 10px;font:inherit;font-size:11px;line-height:18px;cursor:pointer;color:var(--dsw-alias-label-secondary,#4b5563)}',
-        '.tp-chip:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))}',
-        '.tp-chip[aria-pressed="true"]{border-color:var(--dsw-static-deepseek-500,#4176e6);color:var(--dsw-static-deepseek-500,#4176e6);',
-        'background:color-mix(in srgb,var(--dsw-static-deepseek-500,#4176e6) 12%,transparent)}',
-        // 候选行
-        '.tp-list{display:flex;flex-direction:column;gap:6px}',
-        '.tp-issue{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;overflow:hidden}',
-        '.tp-issue-head{display:flex;flex-direction:column;gap:4px;width:100%;padding:8px 10px;border:0;background:none;font:inherit;',
-        'color:inherit;cursor:pointer;text-align:left}',
-        '.tp-issue-head:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.08))}',
-        '.tp-issue-meta{display:flex;align-items:center;gap:8px;min-width:0}',
-        '.tp-seg{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);font-variant-numeric:tabular-nums}',
-        '.tp-hits{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);font-variant-numeric:tabular-nums}',
-        '.tp-pill{flex:0 0 auto;margin-left:auto;font-size:10px;padding:0 7px;border-radius:999px;line-height:16px;border:1px solid}',
-        '.tp-pill[data-state="confirmed"]{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#2e7d32) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#2e7d32) 10%,transparent)}',
-        '.tp-pill[data-state="disputed"]{color:var(--dsw-alias-state-warn-primary,#b26a00);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#b26a00) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#b26a00) 10%,transparent)}',
-        '.tp-pill[data-state="rejected"]{color:var(--dsw-alias-label-tertiary,#8a8f98);border-color:var(--dsw-alias-border-l2,rgba(128,128,128,.3))}',
-        '.tp-issue-body{padding:0 10px 8px}',
-        // 折叠时两行封顶；展开后正文挪到 .tp-full，这里直接收起来，避免同一句话出现两遍。
-        '.tp-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:13px;line-height:1.65;word-break:break-word}',
-        '.tp-issue[data-expanded="true"] .tp-text{display:none}',
-        '.tp-full{margin:0 0 6px;font-size:13px;line-height:1.7;word-break:break-word;color:var(--dsw-alias-label-primary,#14181f)}',
-        '.tp-del{color:var(--dsw-alias-state-error-primary,#d33);text-decoration:line-through;background:var(--dsw-alias-code-diff-deleted,rgba(211,47,47,.13));border-radius:3px;padding:0 1px}',
-        '.tp-ins{color:var(--dsw-alias-state-success-primary,#2e7d32);font-weight:600;background:var(--dsw-alias-code-diff-added,rgba(46,125,50,.14));border-radius:3px;padding:0 1px}',
-        // 否决项：被模型点名的字加虚线下划线，既不划掉也不变绿——原文一个字都不改。
-        '.tp-hint{border-bottom:1px dashed var(--dsw-alias-state-warn-primary,#b26a00);padding-bottom:1px}',
-        '.tp-note{margin:6px 0 0;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);line-height:1.55}',
-        '.tp-context{margin:8px 0 0;padding-left:8px;border-left:2px solid var(--dsw-alias-border-l2,rgba(128,128,128,.24));',
-        'font-size:11px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        '.tp-samples{display:flex;flex-direction:column;gap:2px;margin-top:8px;font-size:11px;line-height:1.5}',
-        '.tp-sample{display:flex;gap:6px;color:var(--dsw-alias-label-secondary,#4b5563)}',
-        '.tp-sample-tag{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#8a8f98);font-variant-numeric:tabular-nums}',
-        // 空态与错误态
-        '.tp-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px 6px;text-align:center}',
-        '.tp-empty-icon{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;',
-        'background:color-mix(in srgb,var(--dsw-static-deepseek-500,#4176e6) 12%,transparent);color:var(--dsw-static-deepseek-500,#4176e6)}',
-        '.tp-empty p{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f98);line-height:1.65;max-width:260px}',
-        '.tp-params{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;width:100%;margin-top:2px;text-align:left;',
-        'padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;font-size:11px}',
-        '.tp-params dt{color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        '.tp-params dd{margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,#4b5563);font-variant-numeric:tabular-nums}',
-        '.tp-error{padding:10px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#d33) 40%,transparent);',
-        'border-radius:10px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d33) 8%,transparent);',
-        'font-size:12px;color:var(--dsw-alias-state-error-primary,#d33);line-height:1.6}',
-        // 设置表单：字段竖排，两个数字并排，其余整行。
-        '.tp-input-row{display:flex;align-items:center;gap:6px;min-width:0}',
-        '.tp-input-row .tp-input{flex:1 1 auto;min-width:0}',
-        '.tp-picker{display:flex;flex-direction:column;gap:8px;min-height:0;flex:1 1 auto}',
-        '.tp-picker-bar{display:flex;align-items:center;gap:8px;min-width:0}',
-        '.tp-picker-path{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
-        'font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        '.tp-picker-list{flex:1 1 auto;min-height:120px;overflow:auto;display:flex;flex-direction:column;gap:1px;',
-        'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;padding:4px}',
-        '.tp-picker-row{display:flex;align-items:center;gap:8px;width:100%;padding:5px 8px;border:0;border-radius:7px;',
-        'background:none;font:inherit;font-size:12px;color:inherit;cursor:pointer;text-align:left}',
-        '.tp-picker-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))}',
-        '.tp-picker-row[data-selected="true"]{background:color-mix(in srgb,var(--dsw-static-deepseek-500,#4176e6) 14%,transparent);',
-        'color:var(--dsw-static-deepseek-500,#4176e6)}',
-        '.tp-picker-icon{flex:0 0 auto;font-size:9px;line-height:16px;padding:0 5px;border-radius:5px;',
-        'background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        '.tp-picker-icon[data-kind="docx"]{background:color-mix(in srgb,var(--dsw-static-deepseek-500,#4176e6) 18%,transparent);',
-        'color:var(--dsw-static-deepseek-500,#4176e6)}',
-        '.tp-picker-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-        '.tp-form{display:flex;flex-direction:column;gap:10px}',
-        // 空态里那块表单要占满宽度：父级 align-items:center 会把输入框压成内容宽度。
-        '.tp-empty .tp-form{width:100%;text-align:left}',
-        '.tp-field{display:flex;flex-direction:column;gap:3px;min-width:0}',
-        '.tp-field > label{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        '.tp-input{box-sizing:border-box;width:100%;height:28px;padding:0 8px;border-radius:8px;',
-        'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.28));background:var(--dsw-alias-bg-base,#fff);',
-        'color:var(--dsw-alias-label-primary,#14181f);font:inherit;font-size:12px;outline:none}',
-        '.tp-input:focus{border-color:var(--dsw-static-deepseek-500,#4176e6)}',
-        '.tp-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}',
-        '.tp-check{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary,#4b5563)}',
-        '.tp-check input{width:14px;height:14px;margin:0}',
-        '.tp-help{margin:0;font-size:10px;line-height:1.55;color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        '.tp-form-actions{display:flex;justify-content:flex-end;gap:8px;padding-top:2px}',
-        // 对话里的工具卡片
-        '.tp-card{box-sizing:border-box;display:flex;flex-direction:column;gap:8px;max-width:100%;padding:10px 12px;',
-        'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.22));border-radius:12px;',
-        'background:var(--dsw-specific-input-major,transparent);font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,#14181f)}',
-        '.tp-card-head{display:flex;align-items:baseline;gap:8px;min-width:0}',
-        '.tp-card-title{font-weight:600;font-size:13px;flex:0 0 auto}',
-        '.tp-card-file{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f98);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-        '.tp-card-tag{flex:0 0 auto;font-size:10px;padding:0 6px;border-radius:999px;line-height:16px;',
-        'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.24));color:var(--dsw-alias-label-tertiary,#8a8f98)}',
-        '.tp-card-line{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;font-size:12px;color:var(--dsw-alias-label-secondary,#4b5563)}',
-        '.tp-card-line b{font-weight:600;font-variant-numeric:tabular-nums}',
-        '.tp-card-foot{display:flex;align-items:center;gap:8px}',
-        '.tp-card-err{margin:0;white-space:pre-wrap;word-break:break-word;font-size:11px;color:var(--dsw-alias-state-error-primary,#d33)}',
-      ].join('');
+      style.textContent = STYLE_TEXT;
       document.head.appendChild(style);
     }
 
     /**
-     * 把一次采样的文本压成一行：太长就截断，但保留改动点附近的内容。
-     * 面板宽 380px 左右，一行放得下二十来个汉字。
-     * @param {string} text - 采样输出。
-     * @returns {string} 展示文案。
+     * 一条候选能单独拿走哪四段文字。
+     *
+     * 四段都从同一次 `diffChars` 里切：原文、改完的整句、被划掉的字（错字）、
+     * 补上去的字（正字）。整句给别人看、单字自己核对，是两种用法，
+     * 所以不把「错字」做成「原文里划掉的部分」这种推导，直接读 diff 的 del / ins。
+     * @param {object} item - 候选条目。
+     * @param {Array<{ kind: string, text: string }>} [parts] - 已经算好的 `diffChars` 结果；不传就现算。
+     * @returns {{ original: string, corrected: string, wrong: string, right: string }} 四段文本。
      */
-    function sampleLine(text) {
+    function copyPayload(item, parts) {
+      const original = typeof item?.original === 'string' ? item.original : '';
+      const corrected = typeof item?.corrected === 'string' ? item.corrected : '';
+      // 缺一边就不做 diff：老缓存里的条目没有 corrected，硬 diff 会把整句当成「被删掉的字」，
+      // 「复制错字」就会塞进去一整句话。宁可两个按钮变灰。
+      if (original === '' || corrected === '') return { original, corrected, wrong: '', right: '' };
+      // 卡片正文已经算过一遍同一对字符串；一百多条候选时再跑一次 LCS 是白烧的。
+      const diff = Array.isArray(parts) ? parts : diffChars(original, corrected);
+      const join = (kind) =>
+        diff
+          .filter((part) => part.kind === kind)
+          .map((part) => part.text)
+          .join('');
+      return { original, corrected, wrong: join('del'), right: join('ins') };
+    }
+
+    /**
+     * 写进剪贴板。
+     *
+     * 宿主的 Web 入口常常是 http://局域网 IP，浏览器只把 localhost / https 当安全上下文，
+     * 这种页面上 `navigator.clipboard` 是 undefined。所以先走标准 API，
+     * 不可用时退回 textarea + execCommand——这是能在这类页面上真的复制成功的唯一办法。
+     * @param {string} text - 要复制的文本。
+     * @returns {Promise<boolean>} 是否成功。
+     */
+    async function copyText(text) {
       const value = typeof text === 'string' ? text : '';
-      return value.length > 40 ? `${value.slice(0, 40)}…` : value;
+      if (value === '') return false;
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === 'function') {
+          await navigator.clipboard.writeText(value);
+          return true;
+        }
+      } catch {
+        // 权限被拒或非安全上下文：落到下面的兜底。
+      }
+      let area = null;
+      try {
+        area = document.createElement('textarea');
+        area.value = value;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.top = '-1000px';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        if (typeof area.setSelectionRange === 'function') area.setSelectionRange(0, value.length);
+        return typeof document.execCommand === 'function' ? document.execCommand('copy') === true : false;
+      } catch {
+        return false;
+      } finally {
+        // 中途抛错也要摘掉：不摘的话每点一次就在 body 尾巴上留一个看不见的 textarea。
+        if (area !== null) {
+          try {
+            document.body.removeChild(area);
+          } catch {
+            // 已经不在文档里了。
+          }
+        }
+      }
     }
 
     /**
@@ -564,74 +650,151 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 候选行。
+     * 候选卡片。
      *
-     * 折叠时就要看得见句子——只有段号和“3/3”的列表没法扫，等于让人逐条点开。
-     * 展开后补前后句与三次采样：人工最终靠这些判断，而不是靠模型的说法。
-     * @param {{ item: object, expanded: boolean, onToggle: () => void }} props - 候选与展开状态。
+     * 卡片本身就是展开的：段号、票数、结论、差异句、四个复制按钮一直看得见——
+     * 之前要一条条点开才看得到句子，扫一百多条等于点一百多次。
+     * 前一句 / 后一句 / 三次采样收进卡片内部的折叠：判断要看它们，
+     * 但每条都摊开会把面板拉成一堵墙，所以留给人按需打开。
+     * @param {{ item: object, samples: number }} props - 候选与每句采样次数。
      * @returns {object} 元素。
      */
-    function IssueRow({ item, expanded, onToggle, samples }) {
-      const bodyId = `tp-detail-${itemKey(item).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+    function IssueRow({ item, samples }) {
       const full = diffChars(item.original, item.corrected);
       // 否决项：“模型动过这个字”而不是“这个字要删掉”。
-      const display = item.state === 'rejected' ? markProposal(full) : full;
-      const parts = excerptParts(display);
+      const rejected = item.state === 'rejected';
+      const display = rejected ? markProposal(full) : full;
+      const payload = copyPayload(item, full);
+      const total = Number(samples) || 3;
+      const changed = Number(item.changed) || Number(item.hits) || 0;
+      const before = typeof item.prev === 'string' ? item.prev : '';
+      const after = typeof item.next === 'string' ? item.next : '';
+      const list = Array.isArray(item.samples) ? item.samples : [];
+      const [copied, setCopied] = useState('');
+      const timer = useRef(null);
+
+      // 切筛选页签会一次卸掉整列卡片；不清定时器就会在卸载之后 setState。
+      useEffect(
+        () => () => {
+          if (timer.current !== null) clearTimeout(timer.current);
+        },
+        [],
+      );
+
+      /**
+       * 复制一段，成功时亮一下「已复制」。
+       * @param {string} key - 哪一段（四个按钮各自一个）。
+       * @param {string} text - 要复制的文本。
+       */
+      function copy(key, text) {
+        if (text === '') return;
+        if (timer.current !== null) clearTimeout(timer.current);
+        void copyText(text).then((ok) => {
+          // 失败也要把提示清掉：否则上一次的「已复制」会一直挂在卡片上，
+          // 而剪贴板里其实还是上一次的内容。
+          setCopied(ok ? key : '');
+          timer.current = ok
+            ? setTimeout(() => {
+                setCopied('');
+                timer.current = null;
+              }, 1400)
+            : null;
+        });
+      }
+
+      const buttons = [
+        { key: 'original', label: '复制原文', text: payload.original },
+        { key: 'corrected', label: '复制修改后', text: payload.corrected },
+        { key: 'wrong', label: '复制错字', text: payload.wrong },
+        { key: 'right', label: '复制正字', text: payload.right },
+      ];
+
+      /**
+       * 按钮不可用的原因；可用时返回空串。
+       * @param {object} button - 按钮描述。
+       * @returns {string} 说明或空串。
+       */
+      function blockedReason(button) {
+        // 否决项的 diff 是「模型建议」而不是「要改的字」：错字其实是原文里那个正确的字，
+        // 正字反而是被复核否掉的字。这两个口子留着只会把人带偏，干脆关掉。
+        if (rejected && (button.key === 'wrong' || button.key === 'right')) return '否决项没有可改正的字，原文不动';
+        if (button.text === '') return `${button.label}：这段是空的`;
+        return '';
+      }
+
       return h(
         'div',
-        { className: 'tp-issue', 'data-state': item.state, 'data-expanded': expanded ? 'true' : 'false' },
+        { className: 'tp-issue', 'data-state': item.state },
         h(
-          'button',
-          {
-            type: 'button',
-            className: 'tp-issue-head',
-            'aria-expanded': expanded ? 'true' : 'false',
-            'aria-controls': bodyId,
-            onClick: onToggle,
-          },
+          'div',
+          { className: 'tp-issue-head' },
           h(
             'span',
             { className: 'tp-issue-meta' },
             h('span', { className: 'tp-seg' }, `第 ${item.seg} 段`),
-            h('span', { className: 'tp-hits' }, `${item.hits}/${samples}`),
+            h(
+              'span',
+              { className: 'tp-hits', title: changed > Number(item.hits) ? `支持这个改法 ${item.hits}/${total} 次；该处共 ${changed} 次采样改动过` : `支持这个改法 ${item.hits}/${total} 次` },
+              `${item.hits}/${total}`,
+            ),
             h('span', { className: 'tp-pill', 'data-state': item.state }, stateLabel(item.state)),
           ),
-          h('span', { className: 'tp-text' }, renderParts(parts)),
         ),
-        expanded
-          ? h(
+        h(
+          'div',
+          { className: 'tp-issue-body' },
+          h('p', { className: 'tp-full' }, renderParts(display)),
+          item.note === '' ? null : h('p', { className: 'tp-note' }, item.note),
+          h(
+            'div',
+            { className: 'tp-copy' },
+            buttons.map((button) => {
+              const blocked = blockedReason(button);
+              return h(
+                'button',
+                {
+                  key: button.key,
+                  type: 'button',
+                  className: 'tp-copy-btn',
+                  disabled: blocked !== '',
+                  title: blocked !== '' ? blocked : `${button.label}：${button.text}`,
+                  onClick: () => copy(button.key, button.text),
+                },
+                button.label,
+              );
+            }),
+            copied === '' ? null : h('span', { className: 'tp-copy-ok' }, '已复制'),
+          ),
+          h(
+            'details',
+            { className: 'tp-detail' },
+            h('summary', null, `前/后与 ${total} 次采样`),
+            h(
+              'p',
+              { className: 'tp-context' },
+              h('span', null, `前：${before === '' ? '（无）' : before}`),
+              h('br'),
+              h('span', null, `后：${after === '' ? '（无）' : after}`),
+            ),
+            h(
               'div',
-              { className: 'tp-issue-body', id: bodyId },
-              h('p', { className: 'tp-full' }, renderParts(display)),
-              item.note === '' ? null : h('p', { className: 'tp-note' }, item.note),
-              h(
-                'p',
-                { className: 'tp-context' },
-                h('span', null, `前：${sampleLine(item.prev)}`),
-                h('br'),
-                h('span', null, `后：${sampleLine(item.next)}`),
-              ),
-              h(
-                'div',
-                { className: 'tp-samples' },
-                item.samples.map((sample, index) =>
+              { className: 'tp-samples' },
+              list.map((sample, index) =>
+                h(
+                  'div',
+                  { className: 'tp-sample', key: index },
+                  h('span', { className: 'tp-sample-tag' }, `第${index + 1}次`),
+                  // 三次采样往往只差一个字，整句重贴三遍没法对比；只把改动点附近切出来。
                   h(
-                    'div',
-                    { className: 'tp-sample', key: index },
-                    h('span', { className: 'tp-sample-tag' }, `第${index + 1}次`),
-                    // 三次采样往往只差一个字，整句重贴三遍没法对比；只把改动点附近切出来。
-                    h(
-                      'span',
-                      null,
-                      sample === item.original
-                        ? '与原文一致'
-                        : renderParts(excerptParts(diffChars(item.original, sample), 32)),
-                    ),
+                    'span',
+                    null,
+                    sample === item.original ? '与原文一致' : renderParts(excerptParts(diffChars(item.original, sample), 32)),
                   ),
                 ),
               ),
-            )
-          : null,
+            ),
+          ),
+        ),
       );
     }
 
@@ -724,10 +887,10 @@ window.__ModuleLoader__.load({
 
     /**
      * 结果态：四个统计格 + 筛选页签 + 候选列表。
-     * @param {{ state: object, filter: string, onFilter: (next: string) => void, expanded: string | null, onToggle: (seg: string) => void }} props - 状态与交互。
+     * @param {{ state: object, filter: string, onFilter: (next: string) => void }} props - 状态与交互。
      * @returns {object} 元素。
      */
-    function ResultBlock({ state, filter, onFilter, expanded, onToggle }) {
+    function ResultBlock({ state, filter, onFilter }) {
       const counts = state.counts;
       const rows = filterItems(state.items, filter);
       const chips = [
@@ -772,8 +935,6 @@ window.__ModuleLoader__.load({
                 key: itemKey(item),
                 samples: state.samples ?? 3,
                 item,
-                expanded: expanded === itemKey(item),
-                onToggle: () => onToggle(itemKey(item)),
               }),
             ),
       );
@@ -1011,8 +1172,6 @@ window.__ModuleLoader__.load({
       const [source, setSource] = useState(initial);
       const [state, setState] = useState({ status: 'loading' });
       const [filter, setFilter] = useState(FILTER_ALL);
-      // 预览页会指定默认展开的段号；真实宿主不传，就是全部收起。
-      const [expanded, setExpanded] = useState(typeof props.initialExpanded === 'string' ? props.initialExpanded : null);
       const [failure, setFailure] = useState(null);
       const [picker, setPicker] = useState(null);
       // 跑完之后点「换文件」：把结果收起来，回到空态等下一次输入。
@@ -1177,10 +1336,6 @@ window.__ModuleLoader__.load({
         }
       }
 
-      function onToggle(seg) {
-        setExpanded((current) => (current === seg ? null : seg));
-      }
-
       const head = h(
         'div',
         { className: 'tp-head' },
@@ -1267,7 +1422,7 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'tp-body' },
           busy ? h(ProgressBlock, { state, onPause: () => source.pause?.(), onResume: () => source.resume?.(), onStop }) : null,
-          state.status === DONE ? h(ResultBlock, { state, filter, onFilter: setFilter, expanded, onToggle }) : null,
+          state.status === DONE ? h(ResultBlock, { state, filter, onFilter: setFilter }) : null,
         );
       }
 
@@ -1280,7 +1435,7 @@ window.__ModuleLoader__.load({
         done
           ? h(
               'button',
-              { type: 'button', className: 'tp-link', onClick: () => { setForceEmpty(true); setExpanded(null); setFilter(FILTER_ALL); } },
+              { type: 'button', className: 'tp-link', onClick: () => { setForceEmpty(true); setFilter(FILTER_ALL); } },
               '换文件',
             )
           : null,
@@ -1483,6 +1638,8 @@ window.__ModuleLoader__.load({
         viewOf,
         dirOf,
         createHttpSource,
+        copyPayload,
+        ensureStyle,
       },
       /** 预览页用的工厂：直接拿到组件，不必走一遍 apply。 */
       __components: { PanelBody, ToolCard, IssueRow, EmptyState, ProgressBlock, ResultBlock, SettingsForm, FilePicker },

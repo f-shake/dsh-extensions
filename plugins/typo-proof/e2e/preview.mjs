@@ -131,12 +131,12 @@ if (browser === undefined) {
 
 mkdirSync(shotDir, { recursive: true });
 
-/** 全套截图：面板三种阶段 + 浅色 + 展开一条候选 + 对话里的工具卡片。 */
+/** 全套截图：面板三种阶段 + 浅色 + 卡片内部折叠打开 + 对话里的工具卡片。 */
 const SHOTS = [
   { name: 'panel-idle', size: { width: 420, height: 720 }, query: 'view=panel&state=idle&theme=dark' },
   { name: 'panel-running', size: { width: 420, height: 760 }, query: 'view=panel&state=running&theme=dark' },
   { name: 'panel-done', size: { width: 420, height: 960 }, query: 'view=panel&state=done&theme=dark' },
-  { name: 'panel-expanded', size: { width: 420, height: 960 }, query: 'view=panel&state=done&theme=dark&expand=74-0' },
+  { name: 'panel-fold-open', size: { width: 420, height: 1100 }, query: 'view=panel&state=done&theme=dark&fold=open' },
   { name: 'panel-done-light', size: { width: 420, height: 960 }, query: 'view=panel&state=done&theme=light' },
   { name: 'panel-autostart', size: { width: 420, height: 960 }, query: 'view=panel&state=idle&theme=dark&auto=start' },
   { name: 'panel-settings', size: { width: 420, height: 860 }, query: 'view=settings&theme=dark' },

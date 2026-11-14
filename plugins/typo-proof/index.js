@@ -13,7 +13,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { createCache } from "./lib/cache.js";
 import { PROMPT_VERSION } from "./lib/prompts.js";
-import { applySuggestions, runCheck } from "./lib/pipeline.js";
+import { alternativeLabels, applySuggestions, runCheck } from "./lib/pipeline.js";
 import { readSettings, writeSettings } from "./lib/settings.js";
 
 export const name = "typo-proof";
@@ -97,6 +97,18 @@ export function reviewToState(status) {
 }
 
 /**
+ * 「另有改法」这一行：同一位置被合并掉的其它建议。
+ *
+ * 措辞与 CSV 的「备选改法」列共用 `alternativeLabels`，两处不能各写一套。
+ * @param {object} candidate - 合并后的候选。
+ * @returns {string} 说明文字；没有备选时为空串。
+ */
+export function alternativesNote(candidate) {
+  const labels = alternativeLabels(Array.isArray(candidate?.alternatives) ? candidate.alternatives : []);
+  return labels.length === 0 ? "" : `另有改法：${labels.join("、")}`;
+}
+
+/**
  * 候选 → 面板条目。
  * @param {object[]} candidates - 候选。
  * @returns {object[]} 面板条目。
@@ -106,6 +118,8 @@ export function toItems(candidates) {
   return list.map((candidate) => {
     const suggestion = candidate.review?.status === "redirected" ? candidate.review.suggestion : candidate.sugg;
     const samples = Array.isArray(candidate.samples) ? candidate.samples : [];
+    const note = String(candidate.review?.note ?? "");
+    const extra = alternativesNote(candidate);
     return {
       // 同一段里可能有好几条候选，key 不能只用段号——那样 React 会撞车。
       id: typeof candidate.id === "string" ? candidate.id : `${candidate.paraIndex}-${candidate.pos}`,
@@ -113,8 +127,11 @@ export function toItems(candidates) {
       original: candidate.context.text,
       corrected: applySuggestions(candidate.context.text, [{ pos: candidate.pos, sugg: suggestion }]),
       hits: candidate.votes,
+      // 支持最终改法的票数与「这处被改过几次」不是一回事，分开给：面板显示前者，悬停说后者。
+      changed: Number(candidate.changedVotes) || Number(candidate.votes) || 0,
       state: reviewToState(candidate.review?.status ?? "failed"),
-      note: candidate.review?.note ?? "",
+      // 复核说明与「另有改法」拼成一行，面板里不多占一段。
+      note: extra === "" ? note : note === "" ? extra : `${note}；${extra}`,
       prev: candidate.context.before,
       next: candidate.context.after,
       samples: samples.map((text) => (text === "" ? candidate.context.text : text)),
@@ -806,3 +823,4 @@ export async function describeProviders(ctx) {
 }
 
 export { PROMPT_VERSION };
+

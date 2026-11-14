@@ -54,16 +54,47 @@ globalThis.window.__ModuleLoader__ = {
     globalThis.__typoProofModule = module;
   },
 };
-globalThis.document = globalThis.document ?? {
-  getElementById: () => null,
-  createElement: () => ({ set id(value) {}, set textContent(value) {} }),
-  head: { appendChild() {} },
+
+/** 页面上已插入的样式节点：ensureStyle 靠它判断「要不要换内容」。 */
+const styleNodes = new Map();
+
+globalThis.document = {
+  getElementById: (id) => styleNodes.get(id) ?? null,
+  createElement(tag) {
+    const node = { tagName: tag, style: {}, children: [], setAttribute() {}, select() {}, setSelectionRange() {} };
+    let id = "";
+    let text = "";
+    Object.defineProperty(node, "id", {
+      get: () => id,
+      set: (value) => {
+        id = value;
+        styleNodes.set(value, node);
+      },
+    });
+    Object.defineProperty(node, "textContent", {
+      get: () => text,
+      set: (value) => {
+        text = value;
+      },
+    });
+    Object.defineProperty(node, "value", { writable: true, value: "" });
+    return node;
+  },
+  head: {
+    appendChild(node) {
+      if (node.id !== "") styleNodes.set(node.id, node);
+    },
+  },
+  body: { appendChild() {}, removeChild() {} },
+  execCommand: () => true,
 };
 
 await import("../client.js");
 const plugin = globalThis.__typoProofModule.factory((name) => (name === "react" ? FAKE_REACT : undefined));
-const { normalizeState, itemKey, viewOf, dirOf } = plugin.__test;
-const { ToolCard, SettingsForm } = plugin.__components;
+const { normalizeState, itemKey, viewOf, dirOf, copyPayload, ensureStyle } = plugin.__test;
+const { ToolCard, SettingsForm, IssueRow } = plugin.__components;
+// 合并后的候选长什么样、说明怎么拼，由宿主实现；卡片用例用它喂数据，避免两边各写一份。
+const { toItems } = await import("../index.js");
 
 test("client：工具卡片先判错误，失败的调用不能一直显示“正在检查”", () => {
   const failed = textOf(
@@ -200,5 +231,162 @@ test("client：设置保存失败时把原因显示在表单里", () => {
     onCancel: () => {},
   });
   assert.match(textOf(tree), /minHanzi 要是不小于 1 的整数/);
+});
+
+/** 一条典型的候选：卡片用例都拿它当底。 */
+const SAMPLE_ITEM = {
+  id: "12:0:3:帖",
+  seg: 13,
+  prev: "那年冬天特别冷，我住在城西一间没有暖气的出租屋里，每天写字写得手指都僵了，暖气片一直是凉的。",
+  original: "那时候我每天都要花四个小时在论坛上回复贴子。",
+  corrected: "那时候我每天都要花四个小时在论坛上回复帖子。",
+  next: "回完之后手指都僵了，但心里是热的，那点热乎劲儿够我撑过一整个冬天。",
+  hits: 3,
+  state: "confirmed",
+  note: "三次采样都改成了“帖子”。",
+  samples: ["那时候我每天都要花四个小时在论坛上回复帖子。", "那时候我每天都要花四个小时在论坛上回复贴子。", "那时候我每天都要花四个小时在论坛上回复帖子。"],
+};
+
+test("client：复制口分成原文、修改后、错字、正字四段", () => {
+  assert.deepEqual(copyPayload(SAMPLE_ITEM), {
+    original: "那时候我每天都要花四个小时在论坛上回复贴子。",
+    corrected: "那时候我每天都要花四个小时在论坛上回复帖子。",
+    wrong: "贴",
+    right: "帖",
+  });
+
+  // 多字替换：错字/正字都要整段给全，不能只取第一个字。
+  const long = copyPayload({ original: "他担误了时间。", corrected: "他耽误了时间。" });
+  assert.equal(long.wrong, "担");
+  assert.equal(long.right, "耽");
+
+  // 没有改动时两段是空的：按钮要靠它变灰，别把空串塞进剪贴板。
+  const same = copyPayload({ original: "一字不改。", corrected: "一字不改。" });
+  assert.equal(same.wrong, "");
+  assert.equal(same.right, "");
+
+  // 字段缺失/类型不对不能抛：缺了 corrected 就不做 diff，别把整句当成「被删掉的字」。
+  const broken = copyPayload({ original: "只有原文" });
+  assert.equal(broken.original, "只有原文");
+  assert.equal(broken.corrected, "");
+  assert.equal(broken.wrong, "");
+  assert.equal(broken.right, "");
+});
+
+test("client：候选卡片常开，四个复制按钮与内部折叠都在，前/后句不截断", () => {
+  const tree = IssueRow({ item: SAMPLE_ITEM, samples: 3 });
+  const text = textOf(tree);
+
+  assert.match(text, /第 13 段/);
+  assert.match(text, /3\/3/, "票数要一直看得见");
+  assert.match(text, /已确认/);
+
+  const labels = nodesOf(tree)
+    .filter((node) => node.type === "button")
+    .map((node) => textOf(node));
+  assert.deepEqual(labels, ["复制原文", "复制修改后", "复制错字", "复制正字"], "四个按钮，顺序固定");
+
+  // 卡片本体不再是一个折叠按钮：点开整卡的交互已经去掉了。
+  assert.ok(!nodesOf(tree).some((node) => node.props["aria-expanded"] !== undefined), "整卡不该再有 aria-expanded");
+
+  const details = nodesOf(tree).find((node) => node.type === "details");
+  assert.ok(details !== undefined, "前/后与采样要收在卡片内部的折叠里");
+  assert.equal(details.props.open, undefined, "内部折叠默认关，卡片本体常开");
+  assert.match(textOf(details), /前\/后与 3 次采样/);
+
+  // 前/后句给整句：之前按 40 字截断过，判断时被裁掉的恰好是要看的部分。
+  assert.ok(text.includes(SAMPLE_ITEM.prev), "前一句要完整");
+  assert.ok(text.includes(SAMPLE_ITEM.next), "后一句要完整");
+  assert.match(text, /第1次/);
+  assert.match(text, /第3次/);
+  assert.match(text, /三次采样都改成了“帖子”。/, "复核说明要显示");
+});
+
+test("client：合并后的候选真的能走到卡片上——说明、票数与备选都来自同一条数据", () => {
+  // 这里走的是真链路：pipeline 合并后的候选 → toItems → IssueRow，
+  // 而不是直接把预期文案写进 note 再断言它显示出来（那等于什么都没测）。
+  const [item] = toItems([
+    {
+      paraIndex: 806,
+      sentenceIndex: 0,
+      pos: 9,
+      orig: "行",
+      sugg: "算",
+      votes: 2,
+      changedVotes: 3,
+      samples: ["早上妈妈走的时候就行了。"],
+      context: { before: "前一句。", text: "早上妈妈走的时候就行了。", after: "后一句。" },
+      review: { status: "redirected", suggestion: "醒", note: "复核模型也认为这里错，但改成“醒”" },
+      alternatives: [{ sugg: "走", votes: 1, status: "rejected", suggestion: "" }],
+    },
+  ]);
+  const tree = IssueRow({ item, samples: 3 });
+  const text = textOf(tree);
+  assert.match(text, /2\/3/, "票数用支持最终改法的票数，不是该处改动总数");
+  assert.match(text, /复核模型也认为这里错，但改成“醒”；另有改法：走（已否决）/, "否决的备选要标出来，别让人照着改");
+  const hits = nodesOf(tree).find((node) => node.props.className === 'tp-hits');
+  assert.match(String(hits.props.title), /该处共 3 次采样改动过/, "总数藏到悬停里，不占版面");
+});
+
+test("client：否决项的错字/正字按钮禁用——那两个字的语义是反的", () => {
+  const rejected = IssueRow({
+    item: { ...SAMPLE_ITEM, state: "rejected", note: "复核认为这里不是错别字" },
+    samples: 3,
+  });
+  const buttons = new Map(nodesOf(rejected).filter((node) => node.type === "button").map((node) => [textOf(node), node]));
+  assert.equal(buttons.get("复制原文").props.disabled, false);
+  assert.equal(buttons.get("复制修改后").props.disabled, false);
+  assert.equal(buttons.get("复制错字").props.disabled, true, "否决项的「错字」其实是原文里那个对的字");
+  assert.equal(buttons.get("复制正字").props.disabled, true, "否决项的「正字」是被复核否掉的字");
+  assert.match(String(buttons.get("复制错字").props.title), /否决项没有可改正的字/);
+});
+
+test("client：没有错字/正字时按钮禁用，采样与原文一致时不重复贴整句", () => {
+  const same = IssueRow({
+    item: { ...SAMPLE_ITEM, corrected: SAMPLE_ITEM.original, samples: [SAMPLE_ITEM.original] },
+    samples: 3,
+  });
+  const buttons = nodesOf(same).filter((node) => node.type === "button");
+  const byLabel = new Map(buttons.map((node) => [textOf(node), node]));
+  assert.equal(byLabel.get("复制原文").props.disabled, false);
+  assert.equal(byLabel.get("复制修改后").props.disabled, false);
+  assert.equal(byLabel.get("复制错字").props.disabled, true, "没有错字时不能点，点了是往剪贴板塞空串");
+  assert.equal(byLabel.get("复制正字").props.disabled, true);
+  assert.match(textOf(same), /与原文一致/, "采样与原文一致时不要重复贴整句");
+});
+
+test("client：点四个复制按钮，各自把对应那段交给剪贴板", async () => {
+  const captured = [];
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", {
+    value: { clipboard: { writeText: async (value) => captured.push(value) } },
+    configurable: true,
+  });
+  try {
+    const tree = IssueRow({ item: SAMPLE_ITEM, samples: 3 });
+    for (const button of nodesOf(tree).filter((node) => node.type === "button")) {
+      button.props.onClick();
+    }
+    // copyText 是异步的：让它跑完两轮微任务再断言。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(captured, [SAMPLE_ITEM.original, SAMPLE_ITEM.corrected, "贴", "帖"]);
+  } finally {
+    Object.defineProperty(globalThis, "navigator", original);
+  }
+});
+
+test("client：样式表在插件重载后整份换掉，旧规则不会留在页面上", () => {
+  // 模拟「上一次加载插进去的样式还在」：热重载时 ensureStyle 必须换内容而不是直接返回。
+  styleNodes.set("typo-proof", { textContent: ".tp-old-rule{color:red}" });
+  ensureStyle();
+  const replaced = styleNodes.get("typo-proof").textContent;
+  assert.match(replaced, /\.tp-copy-btn/, "新加的复制按钮样式要到位");
+  assert.match(replaced, /\.tp-detail/, "内部折叠的样式要到位");
+  assert.doesNotMatch(replaced, /\.tp-old-rule/, "旧规则要整份被替换掉");
+
+  // 页面上什么都没有时，照旧插一份新的。
+  styleNodes.clear();
+  ensureStyle();
+  assert.match(styleNodes.get("typo-proof").textContent, /\.tp-issue-body/);
 });
 

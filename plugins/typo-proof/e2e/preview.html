@@ -237,12 +237,10 @@
         } else if (view !== 'card') {
           // 插件本体已经没有演示模式，预览页直接把假数据源塞给组件。
           const Panel = plugin.__components.PanelBody;
-          const expand = params.get('expand');
           ReactDOM.createRoot(pane).render(
             h(Panel, {
               sessionId: 'preview',
               source: createFakeSource({ preload: stage }),
-              initialExpanded: expand === null ? undefined : expand,
             }),
           );
         }
@@ -266,6 +264,14 @@
 
         await new Promise((resolve) => requestAnimationFrame(() => resolve()));
         await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+        // ?fold=open 把每张卡片内部那层折叠全部打开：截图要能同时看到
+        // “卡片常开、这层可折”的两种样子，而不是只画其中一态。
+        if (params.get('fold') === 'open') {
+          for (const node of document.querySelectorAll('#pane .tp-detail')) {
+            node.open = true;
+          }
+        }
 
         // ?auto=start 从空态点一下“开始检查”，用来验证交互流程真的跑得通，
         // 而不只是把某个中间状态静态画出来。

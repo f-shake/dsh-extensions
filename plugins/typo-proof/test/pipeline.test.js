@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createCache } from "../lib/cache.js";
-import { mapLimit, runCheck } from "../lib/pipeline.js";
+import { mapLimit, mergeByPosition, runCheck, toCsv } from "../lib/pipeline.js";
 import { readZip } from "../lib/zip.js";
 import { createJobStore, normalizeConfig, panelState } from "../index.js";
 import { miniDocx } from "./fixtures/mini-docx.js";
@@ -204,6 +204,144 @@ test("pipeline：一个任务抛错后，其它并发槽位不再继续跑", asy
   );
   // 抛错之后不应该把剩下十几项全跑完：4 路并发最多再看几个。
   assert.ok(seen.length <= 8, `失败后还在继续跑，共处理 ${seen.length} 项`);
+});
+
+/**
+ * 采样给出两种改法的假模型：同一句的第 1、2 次给「睡得」，第 3 次给「睡底」，复核统一判成「睡得」。
+ *
+ * 用来复现「同一处位置挂两条候选」：先是采样那两条，再是复核把其中一条重定向成另一个字。
+ * 计数要按句子分开记——文档里有好几句，按全局调用次数记会落到错的句子上去。
+ * @returns {object} 假客户端。
+ */
+function mixedClient() {
+  const seen = new Map();
+  const client = {
+    reviewCalls: 0,
+    async complete({ messages }) {
+      const text = messages[0].content[0].text;
+      const marker = "要校对的一句：";
+      const fromReview = text.lastIndexOf(marker);
+      if (fromReview >= 0) {
+        client.reviewCalls += 1;
+        const sentence = text.slice(fromReview + marker.length).split("\n")[0];
+        return sentence.replace("睡的", "睡得");
+      }
+      const sentence = text.split("\n").filter((line) => line.trim() !== "").at(-1);
+      const round = (seen.get(sentence) ?? 0) + 1;
+      seen.set(sentence, round);
+      return sentence.replace("睡的", round === 3 ? "睡底" : "睡得");
+    },
+  };
+  return client;
+}
+
+test("pipeline：同一处位置的两种改法只出一条，票数各归各的，落选改法进备选", () => {
+  const base = {
+    paraIndex: 807,
+    sentenceIndex: 0,
+    pos: 9,
+    paragraphPos: 9,
+    orig: "行",
+    sentence: "早上妈妈走的时候就行了。",
+    context: { before: "", text: "早上妈妈走的时候就行了。", after: "" },
+    samples: [],
+  };
+  const merged = mergeByPosition([
+    { ...base, id: "807:0:9:算", sugg: "算", votes: 1, review: { status: "redirected", suggestion: "醒", note: "复核认为该改，但改成「醒」" } },
+    { ...base, id: "807:0:9:走", sugg: "走", votes: 1, review: { status: "redirected", suggestion: "醒", note: "复核认为该改，但改成「醒」" } },
+  ]);
+
+  assert.equal(merged.length, 1, "同一位置必须只剩一条");
+  assert.equal(merged[0].votes, 1, "票数仍是支持最终改法的票数，不是该处的改动总数");
+  assert.equal(merged[0].changedVotes, 2, "该处被改动过的采样次数另存：两次采样都改过这里");
+  assert.equal(merged[0].id, "807:0:9:算", "同档同票时按 id 稳定，取排在前面的那条");
+  assert.equal(merged[0].review.status, "redirected");
+  assert.deepEqual(
+    merged[0].alternatives.map((item) => item.sugg),
+    ["走"],
+    "被并掉的改法不能丢，报告和 CSV 还要用",
+  );
+});
+
+test("pipeline：合并时确认优先于分歧，分歧优先于否决", () => {
+  const base = {
+    paraIndex: 1,
+    sentenceIndex: 0,
+    pos: 3,
+    context: { before: "", text: "", after: "" },
+    samples: [],
+  };
+  const merged = mergeByPosition([
+    { ...base, id: "1:0:3:甲", sugg: "甲", votes: 3, review: { status: "rejected", note: "" } },
+    { ...base, id: "1:0:3:乙", sugg: "乙", votes: 1, review: { status: "redirected", suggestion: "丙", note: "" } },
+    { ...base, id: "1:0:3:丁", sugg: "丁", votes: 2, review: { status: "confirmed", note: "" } },
+  ]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].sugg, "丁", "确认的改法优先，即便票数不是最高");
+  assert.equal(merged[0].votes, 2, "票数跟着最终改法走");
+  assert.equal(merged[0].changedVotes, 6, "三条票数相加才是该处被改动的次数");
+
+  // 只有分歧与否决时取分歧；分歧的复核建议要留下来，别当成模型原始建议。
+  const redirected = mergeByPosition([
+    { ...base, id: "1:0:3:甲", sugg: "甲", votes: 1, review: { status: "rejected", note: "" } },
+    { ...base, id: "1:0:3:乙", sugg: "乙", votes: 1, review: { status: "redirected", suggestion: "丙", note: "" } },
+  ]);
+  assert.equal(redirected[0].sugg, "乙");
+  assert.equal(redirected[0].alternatives[0].sugg, "甲");
+  assert.equal(redirected[0].alternatives[0].suggestion, "", "被否决的那条没有复核建议");
+});
+
+test("pipeline：不同位置不合并，单条原样返回，空输入不抛", () => {
+  const one = { paraIndex: 3, sentenceIndex: 0, pos: 1, id: "3:0:1:甲", sugg: "甲", votes: 2, context: { before: "", text: "", after: "" }, review: { status: "confirmed", note: "" } };
+  const two = { ...one, pos: 2, id: "3:0:2:乙", sugg: "乙" };
+  const merged = mergeByPosition([two, one]);
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged.map((item) => item.pos), [1, 2], "合并后按段/句/位置排序");
+  assert.equal(merged[0], one, "单条候选原样返回，不复制一份");
+  assert.deepEqual(mergeByPosition([]), []);
+  assert.deepEqual(mergeByPosition(null), []);
+  assert.deepEqual(mergeByPosition([null, 3, "x"]), [], "脏数据不能把整轮检查带崩");
+});
+
+test("pipeline：CSV 最后两列是改动次数与备选改法，前面各列位置不变", () => {
+  const candidate = {
+    paraIndex: 807,
+    sentenceIndex: 0,
+    pos: 9,
+    orig: "行",
+    sugg: "算",
+    votes: 2,
+    changedVotes: 3,
+    sentence: "早上妈妈走的时候就行了。",
+    context: { before: "前一句", text: "早上妈妈走的时候就行了。", after: "后一句" },
+    review: { status: "redirected", suggestion: "醒", note: "复核改成醒" },
+    alternatives: [{ sugg: "走", votes: 1, status: "redirected", suggestion: "醒" }],
+  };
+  const csv = toCsv([candidate]);
+  const [header, row] = csv.replace("\uFEFF", "").trim().split("\r\n");
+  assert.ok(header.endsWith('"改动次数","备选改法"'), "新列只能加在最后，别把前面十列挤错位");
+  assert.ok(row.endsWith('"走（分歧→醒）"'), "备选改法带复核结论，不能只给一个字");
+  assert.equal(row.split('","').length, 12, "列数与表头一致");
+  const cells = row.split('","').map((cell) => cell.replace(/^"|"$/g, ""));
+  assert.equal(cells[4], "2", "投票数＝支持最终改法的次数");
+  assert.equal(cells[10], "3", "改动次数＝该处被改动的总次数");
+  assert.equal(cells[3], "醒", "新字列仍然用复核给的字");
+});
+
+test("pipeline：同一处两种改法跑完一整轮，面板/报告/CSV 都只剩一条", async () => {
+  const { file, cache } = await fixture();
+  const result = await runCheck({ file, llm: mixedClient(), cache, localModel: "m", minHanzi: 8, samples: 3, concurrency: 1 });
+
+  assert.equal(result.candidates.length, 1, "同一位置的两种改法要合并成一条");
+  const only = result.candidates[0];
+  assert.equal(only.votes, 2, "两次采样支持最终这个字");
+  assert.equal(only.changedVotes, 3, "三次采样都改过这处");
+  assert.equal(only.review.status, "confirmed");
+  assert.deepEqual(only.alternatives.map((item) => item.sugg), ["底"], "被并掉的「底」要留下来");
+
+  assert.equal(result.counts.candidates, 1, "报告计数与面板一致");
+  const csv = await readFile(result.csvPath, "utf8");
+  assert.match(csv, /"底（分歧→得）"/, "CSV 的备选改法列要带上复核落点");
 });
 
 test("pipeline：暂停后不再推进，恢复后跑完", async () => {

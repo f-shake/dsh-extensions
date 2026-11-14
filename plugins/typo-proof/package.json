@@ -1,6 +1,6 @@
 {
   "name": "@local/typo-proof",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "日记错别字检查：本地小模型采样三次、云端盲复核，确认的改动以修订模式写进 docx 副本",
@@ -29,7 +29,9 @@
     }
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/",
+    "check:ui": "node e2e/interaction-check.mjs",
+    "preview": "node e2e/preview.mjs"
   },
   "license": "MIT"
 }

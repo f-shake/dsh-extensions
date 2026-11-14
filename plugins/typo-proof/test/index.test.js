@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { miniDocx } from "./fixtures/mini-docx.js";
 
-import { apply, completeText, createHandlers, describeProviders, listDirectory, mergeConfig, suggestNeighbour, normalizeConfig, panelState, reviewToState, sameOrigin, toItems } from "../index.js";
+import { alternativesNote, apply, completeText, createHandlers, describeProviders, listDirectory, mergeConfig, suggestNeighbour, normalizeConfig, panelState, reviewToState, sameOrigin, toItems } from "../index.js";
 
 /**
  * 造一个只会吐固定片段的 llm 服务。
@@ -69,6 +69,60 @@ test("host：redirected 的候选在面板上用复核建议的字", () => {
   assert.equal(items[0].state, "disputed");
   assert.equal(items[0].corrected, "我睡底很晚。");
   assert.equal(items[0].samples[1], "我睡的很晚。", "空样本退回原句，不要给面板一个空行");
+});
+
+test("host：合并后的备选改法拼进说明，不覆盖复核说明", () => {
+  const [merged] = toItems([
+    {
+      paraIndex: 806,
+      pos: 9,
+      orig: "行",
+      sugg: "算",
+      votes: 2,
+      changedVotes: 3,
+      samples: ["早上妈妈走的时候就行了。"],
+      context: { before: "前一句。", text: "早上妈妈走的时候就行了。", after: "后一句。" },
+      review: { status: "redirected", suggestion: "醒", note: "复核模型改成“醒”" },
+      alternatives: [{ sugg: "走", votes: 1, status: "rejected", suggestion: "" }],
+    },
+  ]);
+  assert.equal(merged.note, "复核模型改成“醒”；另有改法：走（已否决）", "两段说明拼一行，备选要带复核结论");
+  assert.equal(merged.corrected, "早上妈妈走的时候就醒了。", "显示仍然用复核给的那个字");
+  assert.equal(merged.hits, 2, "票数是支持最终改法的次数");
+  assert.equal(merged.changed, 3, "该处改动总数另给，面板拿去当悬停说明");
+
+  // 分歧的备选要写出复核最后落到哪个字，否则人会直接改成那个备选的原始建议。
+  const [redirected] = toItems([
+    {
+      paraIndex: 2,
+      pos: 0,
+      orig: "甲",
+      sugg: "乙",
+      votes: 1,
+      samples: [],
+      context: { before: "", text: "甲。", after: "" },
+      review: { status: "confirmed", note: "" },
+      alternatives: [{ sugg: "丙", votes: 1, status: "redirected", suggestion: "丁" }],
+    },
+  ]);
+  assert.equal(redirected.note, "另有改法：丙（分歧→丁）");
+
+  // 没有复核说明时只写备选，不能留下一个孤立的分号。
+  const [bare] = toItems([
+    {
+      paraIndex: 1,
+      pos: 0,
+      orig: "甲",
+      sugg: "乙",
+      votes: 2,
+      samples: [],
+      context: { before: "", text: "甲。", after: "" },
+      review: { status: "confirmed", note: "" },
+      alternatives: [{ sugg: "丙", votes: 1, status: "rejected", suggestion: "" }],
+    },
+  ]);
+  assert.equal(bare.note, "另有改法：丙（已否决）");
+  assert.equal(alternativesNote({}), "", "没有 candidates 字段时给空串");
 });
 
 test("host：配置归一化，非法值退回默认", () => {

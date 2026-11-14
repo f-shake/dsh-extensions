@@ -121,7 +121,7 @@ async function reviewCandidate(input) {
     return {
       status: "redirected",
       suggestion: samePosition.sugg,
-      note: `复核模型也认为这里错，但改成「${samePosition.sugg}」`,
+      note: `复核模型也认为这里错，但改成“${samePosition.sugg}”`,
     };
   } catch (error) {
     return { status: "failed", note: String(error?.message ?? error) };
@@ -140,6 +140,102 @@ export function finalSuggestion(candidate) {
   return candidate.review?.status === "redirected" && typeof candidate.review.suggestion === "string"
     ? candidate.review.suggestion
     : candidate.sugg;
+}
+
+/**
+ * 合并时「留哪一条」的优先级：确认 > 分歧 > 否决 > 复核失败。
+ * 同一处位置两条候选都被确认时，比票数，再按 id 稳定。
+ */
+const REVIEW_RANK = { confirmed: 3, redirected: 2, rejected: 1 };
+
+/**
+ * 按「段:句:句内位置」把候选合并成一条。
+ *
+ * 三次采样在同一处可能给出两种改法（「行→算」「行→走」），`buildCandidates` 是
+ * 按「位置 + 原字 + 改字」记账的，于是同一处会挂两条。复核之后两条可能同时成立
+ * （比如都被重定向成「醒」），面板上就是两张一模一样的卡；写入层也只认排在前面的那条。
+ * 所以出报告之前先合并：
+ *  - 留下优先级最高的那条（确认 > 分歧 > 否决，同档比票数，再按 id 稳定）；
+ *  - `votes` 不动，仍是「支持这个最终改法的采样票数」；该位置被改动过的总次数另存
+ *    `changedVotes`——两者合成一个数，面板的 2/3 就会被读成「三次采样都支持这个字」；
+ *  - 落选的改法记进 alternatives（带复核状态与分歧落点），报告、CSV、面板都还能看到
+ *    模型当时提过什么、复核怎么看它。
+ * @param {object[]} candidates - 复核后的候选。
+ * @returns {object[]} 合并后的候选，按段/句/位置排序。
+ */
+export function mergeByPosition(candidates) {
+  const list = Array.isArray(candidates) ? candidates.filter((item) => item !== null && typeof item === "object") : [];
+  const groups = new Map();
+  for (const candidate of list) {
+    const key = `${candidate.paraIndex}:${candidate.sentenceIndex}:${candidate.pos}`;
+    const bucket = groups.get(key);
+    if (bucket === undefined) groups.set(key, [candidate]);
+    else bucket.push(candidate);
+  }
+
+  const merged = [];
+  for (const bucket of groups.values()) {
+    if (bucket.length === 1) {
+      merged.push(bucket[0]);
+      continue;
+    }
+    const ordered = [...bucket].sort(
+      (left, right) =>
+        (REVIEW_RANK[right.review?.status] ?? 0) - (REVIEW_RANK[left.review?.status] ?? 0) ||
+        (Number(right.votes) || 0) - (Number(left.votes) || 0) ||
+        String(left.id ?? "").localeCompare(String(right.id ?? "")),
+    );
+    const winner = ordered[0];
+    merged.push({
+      ...winner,
+      // votes 不改语义：它始终是「支持这个最终改法的票数」，面板的 2/3、CSV 的投票数都是这个意思。
+      // 该位置被改动过的总次数另存 changedVotes——两者混成一个数，3/3 就会被读成
+      // 「三次采样都支持这个字」，而实际可能只有一次。
+      changedVotes: bucket.reduce((sum, item) => sum + (Number(item.votes) || 0), 0),
+      alternatives: [
+        ...(Array.isArray(winner.alternatives) ? winner.alternatives : []),
+        ...ordered.slice(1).map((item) => ({
+          id: item.id,
+          sugg: item.sugg,
+          votes: Number(item.votes) || 0,
+          status: item.review?.status ?? "",
+          // 分歧项复核给的是另一个字；记下来，免得把复核建议误当成模型原始建议。
+          suggestion: item.review?.status === "redirected" ? String(item.review.suggestion ?? "") : "",
+        })),
+      ],
+    });
+  }
+
+  merged.sort((left, right) => left.paraIndex - right.paraIndex || left.sentenceIndex - right.sentenceIndex || left.pos - right.pos);
+  return merged;
+}
+
+/**
+ * 备选改法的复核结论，用面板上同一个说法。
+ * 放在这里而不是各自的展示层：CSV、面板、以后别的出口都得同一套说法。
+ */
+const ALTERNATIVE_STATE = { confirmed: "已确认", redirected: "分歧", rejected: "已否决", failed: "复核失败" };
+
+/**
+ * 把备选改法写成一行人话。
+ *
+ * 只给一个字是不够的：被否决的改法会被人当成可选答案照着改；分歧项真正被采纳的
+ * 是复核给的那个字，也得写出来。所以每条都带上复核结论，分歧再加「→落点」。
+ * @param {object[]} alternatives - 合并时落选的候选。
+ * @returns {string[]} 形如 `算（已否决）`、`走（分歧→醒）` 的标签。
+ */
+export function alternativeLabels(alternatives) {
+  const list = Array.isArray(alternatives) ? alternatives : [];
+  return list
+    .map((item) => {
+      const word = String(item?.sugg ?? "");
+      if (word === "") return "";
+      const label = ALTERNATIVE_STATE[String(item?.status ?? "")] ?? "";
+      const redirectedTo = String(item?.suggestion ?? "");
+      if (label === "分歧" && redirectedTo !== "") return `${word}（${label}→${redirectedTo}）`;
+      return label === "" ? word : `${word}（${label}）`;
+    })
+    .filter((text) => text !== "");
 }
 
 /**
@@ -288,9 +384,12 @@ export async function runCheck(options) {
 
   if (signal?.aborted === true) throw abortedError();
 
-  emit({ phase: "writing", processed: candidates.length, total: candidates.length, ...scope });
+  // 同一处位置的两条候选在这里并成一条：面板、报告、CSV、写入都只用这一份。
+  const merged = mergeByPosition(candidates);
 
-  const accepted = candidates.filter((candidate) => candidate.review?.status === "confirmed" || candidate.review?.status === "redirected");
+  emit({ phase: "writing", processed: merged.length, total: merged.length, ...scope });
+
+  const accepted = merged.filter((candidate) => candidate.review?.status === "confirmed" || candidate.review?.status === "redirected");
   // 写入层遇到「同一位置两条建议」只取先到的那条，所以这里要先排好：
   // 票数高的在前，同票按 id（段号/句序/位置/字）稳定。排序放在这里而不是写入层，
   // 是为了让写入层不必知道 votes 这件事。
@@ -330,30 +429,31 @@ export async function runCheck(options) {
     skippedParagraphs: skipped,
     counts: {
       sentences: sentences.length,
-      candidates: candidates.length,
-      confirmed: candidates.filter((item) => item.review?.status === "confirmed").length,
-      redirected: candidates.filter((item) => item.review?.status === "redirected").length,
-      rejected: candidates.filter((item) => item.review?.status === "rejected").length,
-      failed: candidates.filter((item) => item.review?.status === "failed").length,
+      // 这里是合并后的条数：一处位置只算一条，和面板上看到的卡片数一致。
+      candidates: merged.length,
+      confirmed: merged.filter((item) => item.review?.status === "confirmed").length,
+      redirected: merged.filter((item) => item.review?.status === "redirected").length,
+      rejected: merged.filter((item) => item.review?.status === "rejected").length,
+      failed: merged.filter((item) => item.review?.status === "failed").length,
       written: applied.length,
     },
     copyPath: applied.length > 0 ? copyPath : "",
     copyBytes: bytes,
     writeSkipped,
-    candidates,
+    candidates: merged,
   };
   await writeFile(reportPath, JSON.stringify(report, null, 2), "utf8");
-  await writeFile(csvPath, toCsv(candidates), "utf8");
+  await writeFile(csvPath, toCsv(merged), "utf8");
   await cache.flush();
 
-  emit({ phase: "done", processed: candidates.length, total: candidates.length, ...scope });
+  emit({ phase: "done", processed: merged.length, total: merged.length, ...scope });
 
   return {
     file,
     documentXml,
     paragraphs,
     sentences,
-    candidates,
+    candidates: merged,
     report,
     reportPath,
     csvPath,
@@ -371,8 +471,12 @@ export async function runCheck(options) {
  */
 export function toCsv(candidates) {
   const escape = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-  const lines = [["段号", "句序", "原字", "新字", "投票数", "复核结论", "复核说明", "原句", "前一句", "后一句"].map(escape).join(",")];
+  // 新增的两列加在最后：前面十列的位置不变，按列号读的脚本不会错位。
+  const lines = [
+    ["段号", "句序", "原字", "新字", "投票数", "复核结论", "复核说明", "原句", "前一句", "后一句", "改动次数", "备选改法"].map(escape).join(","),
+  ];
   for (const candidate of candidates) {
+    const others = Array.isArray(candidate.alternatives) ? candidate.alternatives : [];
     lines.push(
       [
         candidate.paraIndex + 1,
@@ -380,12 +484,16 @@ export function toCsv(candidates) {
         candidate.orig,
         // 与副本实际写入的字保持一致（分歧项取复核建议）。
         finalSuggestion(candidate),
+        // 投票数＝支持这个改法的采样次数；同一处位置的总改动次数在「改动次数」列。
         candidate.votes,
         candidate.review?.status ?? "",
         candidate.review?.note ?? "",
         candidate.context.text,
         candidate.context.before,
         candidate.context.after,
+        Number(candidate.changedVotes) || candidate.votes,
+        // 同一位置被合并掉的其它改法，带复核结论：顿号隔开，和面板上说法一致。
+        alternativeLabels(others).join("、"),
       ]
         .map(escape)
         .join(","),
