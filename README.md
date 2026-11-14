@@ -165,7 +165,7 @@ dsh plugin --profile aa add dsh-mnemon@0.5.42   # 版本与子模块的 tag 保�
   **本体与个人词表分开**：`SKILL.md` / `references/` / `scripts/` 通用可分享；`personal/`
   （真实人名、单位、地名、口头禅）在 `.gitignore` 里，只留本机——别的机器 clone 下来只有方法，没有词表
 
-**本仓库是「源」，`~/.dsh/skills/` 是「副本」——改这里的文件不会自动生效，必须同步：**
+**按复制方式安装时**，本仓库是「源」、`~/.dsh/skills/` 是「副本」——改这里的文件不会自动生效，必须同步；本机现在装的是目录联接，改仓库即时生效（见下方注意）。
 
 ```powershell
 .\scripts\sync-skills.ps1          # 覆盖前备份 + 先删后拷 + 哈希校验
@@ -178,7 +178,7 @@ dsh plugin --profile aa add dsh-mnemon@0.5.42   # 版本与子模块的 tag 保�
 
 > 注意：本机这五个技能装的是**目录联接**（junction），不是副本。跑上面的脚本会先把联接删掉、
 > 再拷一份新副本——之后改仓库就不再生效。恢复：删掉 `~/.dsh/skills/<名>`，再用
-> `New-Item -ItemType Junction -Target <仓库路径>` 重建。
+> `New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\skills\<名>" -Target <仓库路径>` 重建。
 
 **覆盖前会先备份**：要把旧目录拷到 `~/.dsh/skills.bak/<时间戳>/<技能名>`，只留最近 5 份
 （`-MaxBackups` 可调）。备份目录在 `skills/` 外面，不会被当成技能扫到。
@@ -187,7 +187,7 @@ dsh plugin --profile aa add dsh-mnemon@0.5.42   # 版本与子模块的 tag 保�
 几个约束（来自 DSH 的 skill 发现规则）：
 
 - **目录结构必须是 `skills/<name>/SKILL.md`**，发现深度只有一层，不支持嵌套 `**/SKILL.md`；bundle 内部的 `references/` 随意嵌套
-- 用**复制**而不是符号链接：Node 的 `dirent.isDirectory()` 对符号链接目录返回 `false`，会被静默跳过，skill 直接消失
+- 用**复制**或 **Windows 目录联接（junction）**：junction 已实测可被发现（本机五个技能即 junction）。真符号链接不要用——不同平台/版本的发现行为不一致，且没有收益
 - 必须**先删后拷**：直接覆盖会留下上一版已删除的文件
 - DSH 监视 `~/.dsh/skills/`，改完即生效；正文每次加载重读，不必重启
 
