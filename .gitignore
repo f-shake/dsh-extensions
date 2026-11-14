@@ -33,6 +33,14 @@ signing/keystore.properties
 *.apk
 *.aab
 
+# ---------- skills/asr-repair（个人词表：真实人名/单位/地名，只留本机）----------
+skills/asr-repair/personal/
+
+# ---------- dsh-host（在仓库里直接运行启动器会生成带 token 的 URL 与运行态文件）----------
+dsh-host/launcher/*-url.txt
+dsh-host/launcher/dsh.pid
+dsh-host/launcher/dsh.out.log
+
 # ---------- dsh-auth（Python）----------
 .venv/
 __pycache__/

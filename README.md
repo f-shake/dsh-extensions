@@ -6,7 +6,8 @@ DSH（DeepSeek Harness）相关的自研部件，统一放在一个仓库里。
 dsh-extensions/
 ├── dsh-remote-android/        Android 客户端：远程访问 DSH 实例（Kotlin + Compose + WebView）
 ├── dsh-auth/                  DSH 公网访问网关：密码 + TOTP 双因子（Python / FastAPI）
-├── skills/                    技能源文件（同步到 ~/.dsh/skills 生效）：vibe coding 系列 + notify-mail
+├── dsh-host/                  本机实例的启动与接入：启动器、防火墙/portproxy、profile patch
+├── skills/                    技能源文件（同步到 ~/.dsh/skills 生效）：vibe coding 系列 + notify-mail + asr-repair
 └── plugins/                   DSH 客户端插件（Cordis bundle）
     ├── session-activity-order/ 侧栏排序：活跃工作区/会话自动置顶
     ├── header-compact/        窄屏标题行收紧：计数文案换短写法、隐藏手机端无用的「在本地打开」
@@ -58,6 +59,16 @@ powershell -NoProfile -File .\start-auth.ps1     # 前台启动（调试）
 
 密钥不进库：`.env`（TOTP 密钥、密码哈希、cookie 密钥）本机单独维护，
 字段清单见 `.env.example`。`totp-qr.png` 含 TOTP 密钥，同样不进库。
+
+## dsh-host
+
+本机那套 DSH web 实例的启动与接入配置，原本散在 `%LOCALAPPDATA%\DeepSeekHarness`
+和 `~/.dsh/profiles/web`，这里留底：启动器（`launcher.py` + 两个 vbs）、
+`network/setup-lan.ps1`（防火墙 + portproxy，幂等，需管理员）、
+以及 `profile/cordis.patch.yml`（agent preset、本地模型、权限与界面偏好）。
+
+链路与坑（dsh 拒绝通配地址、portproxy 不能监听 `0.0.0.0`、token 只打印一次）
+见 [dsh-host/README.md](dsh-host/README.md)。patch 里没有密钥，只有 `apiKeyEnv` 的变量名。
 
 ## plugins
 
@@ -144,12 +155,15 @@ dsh plugin --profile aa add dsh-mnemon@0.5.42   # 版本与子模块的 tag 保�
 
 ## skills
 
-四个技能的源文件：
+五个技能的源文件：
 
 - `vibe-coding`、`grilling`、`review-and-fix-cycle`：原来在 OneDrive 的独立仓库里，现并入本仓库统一版本管理
 - `notify-mail`：原只存在于 `~/.dsh/skills/`（无源仓库），已收进来当唯一源。正文里的路径仍写
   `~/.dsh/skills/notify-mail\...`，所以**改完必须同步**才能生效；密钥/配置在 `~/.dsh/` 根下的
   `mail.json` + `secrets\resend.key.enc`，不在技能目录里
+- `asr-repair`：从 SpatialQuery 部署环境的 `asr_repair` v4.0.0 拆出来的 ASR 转写稿修复技能。
+  **本体与个人词表分开**：`SKILL.md` / `references/` / `scripts/` 通用可分享；`personal/`
+  （真实人名、单位、地名、口头禅）在 `.gitignore` 里，只留本机——别的机器 clone 下来只有方法，没有词表
 
 **本仓库是「源」，`~/.dsh/skills/` 是「副本」——改这里的文件不会自动生效，必须同步：**
 
@@ -161,6 +175,10 @@ dsh plugin --profile aa add dsh-mnemon@0.5.42   # 版本与子模块的 tag 保�
 
 脚本不碰不归本仓库管理的技能（同一目录下由各自项目维护的那些）；`~/.agents/skills/` 是另一个
 技能根，也不在它的扫描范围里。
+
+> 注意：本机这五个技能装的是**目录联接**（junction），不是副本。跑上面的脚本会先把联接删掉、
+> 再拷一份新副本——之后改仓库就不再生效。恢复：删掉 `~/.dsh/skills/<名>`，再用
+> `New-Item -ItemType Junction -Target <仓库路径>` 重建。
 
 **覆盖前会先备份**：要把旧目录拷到 `~/.dsh/skills.bak/<时间戳>/<技能名>`，只留最近 5 份
 （`-MaxBackups` 可调）。备份目录在 `skills/` 外面，不会被当成技能扫到。

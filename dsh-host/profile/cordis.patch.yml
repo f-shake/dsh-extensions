@@ -1,0 +1,92 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+- id: ui-settings-general
+  name: "@deepseek-ai/dsh-client-ui-settings-general"
+  config:
+    welcomeNoticeVersion: 2026-09-28.1
+- id: ui-chat
+  name: "@deepseek-ai/dsh-client-ui-chat"
+  config:
+    transcriptView: standard
+- id: ui-conversation
+  name: "@deepseek-ai/dsh-client-ui-conversation"
+  config:
+    busyEnter: steer
+- id: permission
+  name: "@deepseek-ai/dsh-permission-presets"
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+    defaultPreset: danger-full-access
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      local:
+        apiKeyEnv: LOCAL_API_KEY
+        api: openai-completions
+        baseURL: http://127.0.0.1:8081/v1
+        models:
+          - id: local-model
+            name: local-model
+# Chat-only agent preset: plain conversation plus web search/fetch, no rows that
+# reach the local machine (no fs, shell, jobs, skills, goals, subagents, workflow).
+# A patch entry without `id` pushes its `insert` list onto the top level, which is
+# how a profile adds a row the shipped bundles never declared.
+- insert:
+    - id: preset-chat
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: chat
+        name: 问答（无命令行）
+        description: 只做问答与联网搜索/抓取：没有命令、文件读写、作业、技能、子代理工具；投递与文档处理类插件仍可用
+        order: 0
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: |
+                You answer the way a chat app does: plain conversation plus web
+                search and page fetching. You have no shell, file-editing, job,
+                skill, or subagent tools. A few host plugins may still expose
+                file delivery and document proofreading, so never claim
+                capabilities beyond what the tool list shows.
+          - id: time-context
+            name: "@deepseek-ai/dsh-time-context"
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: "@deepseek-ai/dsh-compaction-basic"
+              - id: command-compact
+                name: "@deepseek-ai/dsh-command-compact"
+              - id: tool-result-pruner
+                name: "@deepseek-ai/dsh-compaction-tool-result-pruner"
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-ask-user
+            name: "@deepseek-ai/dsh-tool-ask-user"
+          - id: tool-web
+            name: "@deepseek-ai/dsh-tool-web"
+            config:
+              fetch: true
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: local
+    model: local-model
