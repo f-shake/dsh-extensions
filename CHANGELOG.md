@@ -26,6 +26,27 @@
 
 ---
 
+## 2026-11-14 · 子模块跟进上游：live-compact 1.1.7、mnemon 0.5.45
+
+**部件**：`plugins/external/dsh-live-compact`、`plugins/external/dsh-mnemon`
+
+**变了什么**
+
+- `dsh-live-compact` 1.1.5 → 1.1.7：billion-context 接管官方压缩时一律让位，不再同时改写会话；
+  长 read 失败改走普通选点，重复 `toolCallId` 按原文哈希区分，raw 已写而 meta 缺时重启后可重建；
+  大段 catch-up 期间按会话维护闸让出事件循环（#49）；导出 `dsh-live-compact/package.json`，
+  宿主 bundle loader 才读得到包元数据（#53）。
+- `dsh-mnemon` 0.5.42 → 0.5.45：DSH 0.2.2-rc2 上收起已下线的记忆卡片；技能来源目录组可折叠、
+  链接技能可按需更新原件；空闲复核的输出预算与“上下文销毁后取消复核”两处修复；
+  嵌入凭据不再写进 profile 设置。
+
+**要动手**
+
+- 无。子模块指针跟着 pull 走，`git submodule update --init --recursive` 之后即到位。
+- 但要分清：这只是仓库里锁的版本。本机 profile 实际装的仍是 `dsh-live-compact` 1.1.5、
+  `dsh-mnemon` 0.5.42；要跟进得改 profile `package.json` 的版本、在 profile 目录 `pnpm install`，
+  再重启 dsh 才生效。
+
 ## 2026-11-14 · 新增更新日志与跨机检查脚本
 
 **部件**：`CHANGELOG.md`（新）、`scripts/check-updates.ps1`（新）、`README.md`
